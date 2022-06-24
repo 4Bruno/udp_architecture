@@ -10,7 +10,8 @@ typedef SOCKET socket_handle ;
 typedef int socklen_t;
 
 #elif defined __linux__
-
+#include <sys/socket.h>
+#include <netinet/in.h>
 typedef int socket_handle ;
 
 #else

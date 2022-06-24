@@ -1,8 +1,9 @@
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <fcntl.h>
+#include <sys/errno.h>
+#include <string.h>
 #include "platform.h"
 #include "network_udp.h"
+
 
 bool
 InitializeSockets()
@@ -20,9 +21,9 @@ SET_SOCKET_NON_BLOCKING(SetSocketNonBlocking)
 {
     int nonBlocking = 1;
 
-    int result = fcntl( fd, F_SETFL, O_NONBLOCK, nonBlocking );
+    int result = fcntl( handle, F_SETFL, O_NONBLOCK, nonBlocking );
 
-    resut = (result != -1);
+    result = (result == -1);
 
     return result;
 }
@@ -31,7 +32,7 @@ CREATE_SOCKET_UDP(CreateSocketUdp)
 {
     *handle = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
 
-    int result = ( (*handle) == INVALID_SOCKET );
+    int result = ( (*handle) == -1 );
 
     return result;
 }
@@ -47,13 +48,38 @@ BIND_SOCKET(BindSocket)
     int result = bind( handle, 
                        (const sockaddr*) &address, 
                        sizeof(sockaddr_in) );
-    result = (result == SOCKET_ERROR);
+    result = (result == -1);
 
     return result;
 }
 
-GET_LAST_SOCKET_ERROR(GetLastSocketError)
+GET_LAST_SOCKET_ERROR_MESSAGE(GetLastSocketErrorMessage)
 {
-    return 0;
+    int err = errno;
+    return strerror(err);
 }
 
+CREATE_SOCKET_ADDRESS(CreateSocketAddress)
+{
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl( ip_address );
+    addr.sin_port = htons( port );
+
+    return addr;
+}
+
+SEND_PACKAGE(SendPackage)
+{
+    int sent_bytes = 
+        sendto( handle, 
+                (const char*)data, 
+                size,
+                0, 
+                (sockaddr*)&address, 
+                sizeof(sockaddr_in) );
+
+    int result = ( sent_bytes != size);
+
+    return result;
+}

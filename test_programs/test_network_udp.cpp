@@ -1,6 +1,6 @@
 #include "../src/network_udp.h"
 #include "../src/logger.h"
-
+#include <string.h>
 
 int
 main()
