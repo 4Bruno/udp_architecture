@@ -5,14 +5,22 @@
 
 #ifdef _WIN32
 
+#define _CRT_NO_POSIX_ERROR_CODES
 #include <winsock2.h>
 typedef SOCKET socket_handle ;
 typedef int socklen_t;
+#define socket_errno GetLastError()
+#ifndef SOCKET_ERROR
+#error Windows missing SOCKET_ERROR definition?
+#endif
+#define EWOULDBLOCK WSAEWOULDBLOCK
 
 #elif defined __linux__
 #include <sys/socket.h>
 #include <netinet/in.h>
 typedef int socket_handle ;
+#define socket_errno errno
+#define SOCKET_ERROR -1
 
 #else
 
@@ -52,6 +60,10 @@ SEND_PACKAGE(SendPackage);
 #define CREATE_SOCKET_ADDRESS(name) sockaddr_in name(u32 ip_address, int port)
 typedef CREATE_SOCKET_ADDRESS(create_socket_address);
 CREATE_SOCKET_ADDRESS(CreateSocketAddress);
+
+#define CLOSE_SOCKET(name) void name(socket_handle handle)
+typedef CLOSE_SOCKET(close_socket);
+CLOSE_SOCKET(CloseSocket);
 
 #define PORTABLE_NETWORK_UDP_H
 #endif

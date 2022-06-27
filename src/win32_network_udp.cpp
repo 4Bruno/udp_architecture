@@ -2,6 +2,7 @@
 #include <stdio.h>
 #pragma comment( lib, "wsock32.lib" )
 #include "network_udp.h"
+#include "logger.h"
 
 
 static char g_socket_library_formatted_internal_error_buffer[1024] = {};
@@ -61,6 +62,8 @@ GET_LAST_SOCKET_ERROR_MESSAGE(GetLastSocketErrorMessage)
     DWORD err_no = GetLastError();
     LPTSTR Error = 0;
 
+    logn("System error code %lu",err_no);
+
     if(FormatMessage(  FORMAT_MESSAGE_FROM_SYSTEM,
                 NULL,
                 err_no,
@@ -83,6 +86,11 @@ CREATE_SOCKET_ADDRESS(CreateSocketAddress)
     addr.sin_port = htons( port );
 
     return addr;
+}
+
+CLOSE_SOCKET(CloseSocket)
+{
+    closesocket(handle);
 }
 
 
