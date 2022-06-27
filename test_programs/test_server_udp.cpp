@@ -28,7 +28,6 @@ main()
 
     socket_handle handle = 0;
     int port = 30000;
-    const char * msg = "Hello";
 
     SOCKET_RETURN_ON_ERROR(CreateSocketUdp(&handle));
     SOCKET_RETURN_ON_ERROR(BindSocket(handle, port));
@@ -71,12 +70,21 @@ main()
                 ntohs( from.sin_port );
 
             // process received packet
-            logn("[%i.%i.%i.%i] Message (%i) received %.*s", 
+            logn("[%i.%i.%i.%i] Message (%i) received %s", 
                                                              (from_address >> 24),
                                                              (from_address >> 16)  & 0xFF0000,
                                                              (from_address >> 8)   & 0xFF00,
                                                              (from_address >> 0)   & 0xFF,
-                                                             fromLength, packet_data.id, packet_data.msg); 
+                                                             packet_data.id, packet_data.msg); 
+
+            struct packet ack;
+            ack.id = packet_data.id;
+            sprintf(ack.msg, "I got our msg %i", packet_data.id);
+            if (SendPackage(handle,from, (void *)&ack, sizeof(ack)) == SOCKET_ERROR)
+            {
+                logn("Error sending ack package %i. %s", ack.id, GetLastSocketErrorMessage());
+                keep_alive = 0;
+            }
         }
     }
 

@@ -13,5 +13,6 @@ set CompilationFlags=/Zi %Optimization% /EHa- /Zo
 pushd %build_path%
 
 cl /Od %CompilationFlags% /I ..\..\src  ..\..\test_programs\test_network_udp.cpp ..\..\src\win32_network_udp.cpp
+cl /Od %CompilationFlags% /I ..\..\src  ..\..\test_programs\test_server_udp.cpp ..\..\src\win32_network_udp.cpp
 
 popd
