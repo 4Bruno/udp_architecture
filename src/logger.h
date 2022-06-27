@@ -1,6 +1,6 @@
 #ifndef PORTABLE_LOGGER_H
 
-#include <stdio.h>
+#include "platform.h"
 
 #define logn( format, ...) printf( format "\n", ## __VA_ARGS__ )
 

@@ -1,8 +1,8 @@
 #include <fcntl.h>
-#include <sys/errno.h>
 #include <string.h>
 #include "platform.h"
 #include "network_udp.h"
+#include <unistd.h> // sysconf
 
 
 bool
@@ -82,4 +82,9 @@ SEND_PACKAGE(SendPackage)
     int result = ( sent_bytes != size);
 
     return result;
+}
+
+CLOSE_SOCKET(CloseSocket)
+{
+    close(handle);
 }

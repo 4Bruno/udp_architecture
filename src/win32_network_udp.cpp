@@ -1,5 +1,3 @@
-//#include <windows.h>
-#include <stdio.h>
 #pragma comment( lib, "wsock32.lib" )
 #include "network_udp.h"
 #include "logger.h"

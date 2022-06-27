@@ -4,7 +4,6 @@
 #include "platform.h"
 
 #ifdef _WIN32
-
 #define _CRT_NO_POSIX_ERROR_CODES
 #include <winsock2.h>
 typedef SOCKET socket_handle ;
@@ -17,6 +16,7 @@ typedef int socklen_t;
 
 #elif defined __linux__
 #include <sys/socket.h>
+#include <sys/errno.h>
 #include <netinet/in.h>
 typedef int socket_handle ;
 #define socket_errno errno

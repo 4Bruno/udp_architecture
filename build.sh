@@ -9,4 +9,8 @@ fi
 # serious_c_flags="-m64 -pedantic -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes -Wmissing-prototypes"
 serious_c_flags="-m64 -pedantic -Wshadow -Wpointer-arith -Wcast-qual"
 # -std=gnu11
+echo "Building test network udp client"
 gcc $serious_c_flags -Wall -DDAEMON=0 -DDEBUG=0 -DDISABLE_STDIO=0  -ggdb test_programs/test_network_udp.cpp src/linux_network_udp.cpp -o build/debug/test_network_udp.exe
+
+echo "Building test network server"
+gcc $serious_c_flags -Wall -DDAEMON=0 -DDEBUG=0 -DDISABLE_STDIO=0  -ggdb test_programs/test_server_udp.cpp src/linux_network_udp.cpp -o build/debug/test_server.exe

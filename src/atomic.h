@@ -1,15 +1,15 @@
 #ifndef PLATFORM_ATOMIC_H
 
 
-#ifdef _WIN32
-#include <windows.h>
-#include <winnt.h>
 #include "platform.h"
+
+#ifdef _WIN32
+#include <winnt.h>
 inline int AtomicLockAndExchange(volatile i32 * dest, i32 value)
 {
     return InterlockedExchange((volatile long *)dest, value);
 }
-#elif define __linux__
+#elif defined __linux__
 inline int AtomicLockAndExchange(volatile i32 * dest, i32 value)
 {
     return __sync_lock_test_and_set ((volatile long *)dest, value);
