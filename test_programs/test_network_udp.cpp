@@ -11,6 +11,12 @@
 
 static volatile int keep_alive = 1;
 
+struct packet
+{
+    i32 id;
+    char msg[256];
+};
+
 #if _WIN32
 BOOL WINAPI 
 HandleCtlC(DWORD dwCtrlType)
@@ -61,17 +67,21 @@ main()
 #else
     u32 ip_addr = IP_ADDR( 3, 71, 72, 238);
 #endif
-    const char * msg = "Hello";
     sockaddr_in addr = CreateSocketAddress( ip_addr, port);
 
     SOCKET_RETURN_ON_ERROR(CreateSocketUdp(&handle));
     SOCKET_RETURN_ON_ERROR(BindSocket(handle, port));
     SOCKET_RETURN_ON_ERROR(SetSocketNonBlocking(handle));
     
+    struct packet packet;
+    i32 packet_stack = 0;
+
     while ( keep_alive )
     {
-      SOCKET_RETURN_ON_ERROR(SendPackage(handle,addr, (void *)msg, strlen(msg)));
-      Sleep(1000);
+        packet.id = packet_stack++;
+        sprintf(packet.msg, "Hello, this is msg number %i", packet.id); 
+        SOCKET_RETURN_ON_ERROR(SendPackage(handle,addr, (void *)&packet, sizeof(packet)));
+        Sleep(1000);
     }
 
     const char * msg_exit = "Bye";

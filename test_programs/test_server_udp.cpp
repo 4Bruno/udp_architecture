@@ -12,6 +12,12 @@
 
 static volatile int keep_alive = 1;
 
+struct packet
+{
+    i32 id;
+    char msg[256];
+};
+
 int
 main()
 {
@@ -31,14 +37,14 @@ main()
     logn("Starting server");
     while ( keep_alive )
     {
-        char packet_data[256];
+        struct packet packet_data;
         u32 max_packet_size = sizeof( packet_data );
 
         sockaddr_in from;
         socklen_t fromLength = sizeof( from );
 
         int bytes = recvfrom( handle, 
-                              (char*)packet_data, max_packet_size, 
+                              (char *)&packet_data, max_packet_size, 
                               0, 
                               (sockaddr*)&from, &fromLength );
 
@@ -65,11 +71,12 @@ main()
                 ntohs( from.sin_port );
 
             // process received packet
-            logn("[%i.%i.%i.%i] Message received %.*s", (from_address >> 24),
-                                                        (from_address >> 16)  & 0xFF0000,
-                                                        (from_address >> 8)   & 0xFF00,
-                                                        (from_address >> 0)   & 0xFF,
-                                                        fromLength, packet_data); 
+            logn("[%i.%i.%i.%i] Message (%i) received %.*s", 
+                                                             (from_address >> 24),
+                                                             (from_address >> 16)  & 0xFF0000,
+                                                             (from_address >> 8)   & 0xFF00,
+                                                             (from_address >> 0)   & 0xFF,
+                                                             fromLength, packet_data.id, packet_data.msg); 
         }
     }
 

@@ -1,18 +1,19 @@
-
 #ifndef PORTABLE_NETWORK_UDP_H
 
 #include "platform.h"
 
 #ifdef _WIN32
 #define _CRT_NO_POSIX_ERROR_CODES
-#include <winsock2.h>
 typedef SOCKET socket_handle ;
 typedef int socklen_t;
 #define socket_errno GetLastError()
 #ifndef SOCKET_ERROR
 #error Windows missing SOCKET_ERROR definition?
 #endif
+#ifdef EWOULDBLOCK
+#undef EWOULDBLOCK
 #define EWOULDBLOCK WSAEWOULDBLOCK
+#endif
 
 #elif defined __linux__
 #include <sys/socket.h>

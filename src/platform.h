@@ -1,4 +1,3 @@
-
 #ifndef PORTABLE_PLATFORM_H
 
 #ifdef _WIN32
