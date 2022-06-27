@@ -86,8 +86,6 @@ HandleCtlC(DWORD dwCtrlType)
         signal_handled = true;
     }
 
-    logn("Got console ctrl handler code %lu", dwCtrlType);
-
     return signal_handled;
 }
 
@@ -114,7 +112,7 @@ main()
 
     socket_handle handle = 0;
     int port = 30000;
-#if 1
+#if 0
     u32 ip_addr = IP_ADDR( 127, 0 , 0 , 1);
 #else
     u32 ip_addr = IP_ADDR( 3, 71, 72, 238);

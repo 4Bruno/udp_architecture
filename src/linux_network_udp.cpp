@@ -23,8 +23,6 @@ SET_SOCKET_NON_BLOCKING(SetSocketNonBlocking)
 
     int result = fcntl( handle, F_SETFL, O_NONBLOCK, nonBlocking );
 
-    result = (result == -1);
-
     return result;
 }
 
@@ -32,9 +30,7 @@ CREATE_SOCKET_UDP(CreateSocketUdp)
 {
     *handle = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
 
-    int result = ( (*handle) == -1 );
-
-    return result;
+    return (*handle);
 }
 
 
@@ -48,7 +44,6 @@ BIND_SOCKET(BindSocket)
     int result = bind( handle, 
                        (const sockaddr*) &address, 
                        sizeof(sockaddr_in) );
-    result = (result == -1);
 
     return result;
 }
@@ -79,9 +74,7 @@ SEND_PACKAGE(SendPackage)
                 (sockaddr*)&address, 
                 sizeof(sockaddr_in) );
 
-    int result = ( sent_bytes != size);
-
-    return result;
+    return sent_bytes;
 }
 
 CLOSE_SOCKET(CloseSocket)

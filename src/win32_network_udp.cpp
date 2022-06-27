@@ -24,7 +24,7 @@ SET_SOCKET_NON_BLOCKING(SetSocketNonBlocking)
 {
     DWORD nonBlocking = 1;
 
-    int result = (ioctlsocket( handle, FIONBIO, &nonBlocking ) != 0);
+    int result = ioctlsocket( handle, FIONBIO, &nonBlocking );
 
     return result;
 }
@@ -33,7 +33,7 @@ CREATE_SOCKET_UDP(CreateSocketUdp)
 {
     *handle = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
 
-    int result = ( (*handle) == INVALID_SOCKET );
+    int result = ( (*handle) == INVALID_SOCKET ) ? SOCKET_ERROR : 1;
 
     return result;
 }
@@ -49,8 +49,6 @@ BIND_SOCKET(BindSocket)
     int result = bind( handle, 
                        (const sockaddr*) &address, 
                        sizeof(sockaddr_in) );
-    result = (result == SOCKET_ERROR);
-
     return result;
 }
 
@@ -102,7 +100,5 @@ SEND_PACKAGE(SendPackage)
                 (sockaddr*)&address, 
                 sizeof(sockaddr_in) );
 
-    int result = ( sent_bytes != size);
-
-    return result;
+    return sent_bytes;
 }
