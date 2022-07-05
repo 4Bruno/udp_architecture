@@ -12,7 +12,8 @@ set CompilationFlags=/Zi %Optimization% /EHa- /Zo
 
 pushd %build_path%
 
-cl /Od %CompilationFlags% /I ..\..\src  ..\..\test_programs\test_network_udp.cpp ..\..\src\win32_network_udp.cpp
-cl /Od %CompilationFlags% /I ..\..\src  ..\..\test_programs\test_server_udp.cpp ..\..\src\win32_network_udp.cpp
+cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\test_programs\test_network_udp.cpp ..\..\src\win32_network_udp.cpp
+cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\test_programs\test_server_udp.cpp ..\..\src\win32_network_udp.cpp
+rem cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\test_programs\test_win32_high_resolution_timer.cpp
 
 popd

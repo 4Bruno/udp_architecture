@@ -29,7 +29,7 @@ typedef int socket_handle ;
 
 #endif
 
-#define IP_ADDR(a,b,d,c) ((a << 24) |\
+#define IP_ADDR(a,b,c,d) ((a << 24) |\
                           (b << 16) |\
                           (c << 8)  |\
                           d)

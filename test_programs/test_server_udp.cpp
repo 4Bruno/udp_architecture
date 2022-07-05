@@ -3,6 +3,7 @@
 #include "../src/logger.h"
 #include <string.h>
 #include "../src/atomic.h"
+#include "test_network.h"
 
 #define SOCKET_RETURN_ON_ERROR(fcall) if ((fcall) == SOCKET_ERROR)\
                               {\
@@ -11,12 +12,6 @@
                               }
 
 static volatile int keep_alive = 1;
-
-struct packet
-{
-    i32 id;
-    char msg[256];
-};
 
 int
 main()
@@ -75,14 +70,14 @@ main()
                                                              (from_address >> 16)  & 0xFF0000,
                                                              (from_address >> 8)   & 0xFF00,
                                                              (from_address >> 0)   & 0xFF,
-                                                             packet_data.id, packet_data.msg); 
+                                                             packet_data.seq, packet_data.msg); 
 
             struct packet ack;
-            ack.id = packet_data.id;
-            sprintf(ack.msg, "I got our msg %i", packet_data.id);
+            ack.seq = packet_data.seq;
+            sprintf(ack.msg, "I got our msg %i", packet_data.seq);
             if (SendPackage(handle,from, (void *)&ack, sizeof(ack)) == SOCKET_ERROR)
             {
-                logn("Error sending ack package %i. %s", ack.id, GetLastSocketErrorMessage());
+                logn("Error sending ack package %i. %s", ack.seq, GetLastSocketErrorMessage());
                 keep_alive = 0;
             }
         }

@@ -14,5 +14,11 @@
 typedef uint32_t u32;
 typedef int32_t i32;
 
+typedef uint16_t u16;
+typedef int16_t i16;
+
+typedef float r32;
+typedef double r64;
+
 #define PORTABLE_PLATFORM_H
 #endif
