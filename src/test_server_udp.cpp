@@ -1,8 +1,7 @@
-
-#include "../src/network_udp.h"
-#include "../src/logger.h"
+#include "network_udp.h"
+#include "logger.h"
 #include <string.h>
-#include "../src/atomic.h"
+#include "atomic.h"
 #include "test_network.h"
 
 #define SOCKET_RETURN_ON_ERROR(fcall) if ((fcall) == SOCKET_ERROR)\
@@ -25,9 +24,15 @@ main()
     int port = 30000;
 
     SOCKET_RETURN_ON_ERROR(CreateSocketUdp(&handle));
+
+    // https://docs.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse
+    BOOL opt_val = TRUE;
+    int opt_len = sizeof(opt_val);
+    setsockopt(handle, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt_val, opt_len);
+    
     SOCKET_RETURN_ON_ERROR(BindSocket(handle, port));
     SOCKET_RETURN_ON_ERROR(SetSocketNonBlocking(handle));
-    
+
     logn("Starting server");
     while ( keep_alive )
     {
@@ -44,11 +49,12 @@ main()
 
         if ( bytes == SOCKET_ERROR )
         {
-            if (socket_errno != EWOULDBLOCK)
+            if (socket_errno != EWOULDBLOCK && socket_errno != WSAECONNRESET)
             {
                 logn("Error recvfrom(). %s", GetLastSocketErrorMessage());
                 return 1;
             }
+            Sleep(1000);
         }
         else if ( bytes == 0 )
         {
@@ -65,7 +71,7 @@ main()
                 ntohs( from.sin_port );
 
             // process received packet
-            logn("[%i.%i.%i.%i] Message (%i) received %s", 
+            logn("[%i.%i.%i.%i] Message (%u) received %s", 
                                                              (from_address >> 24),
                                                              (from_address >> 16)  & 0xFF0000,
                                                              (from_address >> 8)   & 0xFF00,
@@ -74,10 +80,11 @@ main()
 
             struct packet ack;
             ack.seq = packet_data.seq;
-            sprintf(ack.msg, "I got our msg %i", packet_data.seq);
+            ack.ack = packet_data.seq;
+            sprintf(ack.msg, "I got our msg %u", packet_data.seq);
             if (SendPackage(handle,from, (void *)&ack, sizeof(ack)) == SOCKET_ERROR)
             {
-                logn("Error sending ack package %i. %s", ack.seq, GetLastSocketErrorMessage());
+                logn("Error sending ack package %u. %s", ack.seq, GetLastSocketErrorMessage());
                 keep_alive = 0;
             }
         }

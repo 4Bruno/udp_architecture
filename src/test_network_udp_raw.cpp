@@ -1,7 +1,7 @@
-#include "../src/network_udp.h"
-#include "../src/logger.h"
+#include "network_udp.h"
+#include "logger.h"
 #include <string.h>
-#include "../src/atomic.h"
+#include "atomic.h"
 #include "test_network.h"
 
 #pragma comment( lib, "Winmm.lib" )
@@ -42,9 +42,8 @@ IsSeqGreaterThan(u16 a, u16 b)
 
 
 int
-HandleRecv(socket_handle handle, u32 * remote_seq_number)
+HandleRecv(socket_handle handle, u32 * remote_seq_number, u32 * remote_ack_bit)
 {
-
     int recv_status = -1;
 
     struct packet packet_data;
@@ -93,6 +92,15 @@ HandleRecv(socket_handle handle, u32 * remote_seq_number)
         {
             *remote_seq_number = packet_data.ack;
         }
+
+        for (int i = 0; i < 32;++i)
+        {
+            i32 mask = (1 << i);
+            i32 signaled_received = packet_data.ack_bit & mask;
+            if (signaled_received)
+            {
+            }
+        }
     }
 
     return recv_status;
@@ -129,18 +137,6 @@ InitializeTerminateSignalHandler()
 #endif
 }
 
-struct package_info
-{
-    SYSTEMTIME system_time;
-    u32 id;
-};
-
-struct packet_queue
-{
-#define PACKAGES_PER_SECOND 4
-    struct package_info packages[PACKAGES_PER_SECOND];
-};
-
 inline LARGE_INTEGER
 Win32QueryPerformance()
 {
@@ -158,22 +154,12 @@ Win32QueryPerformanceDiff(LARGE_INTEGER TimeEnd,LARGE_INTEGER TimeStart,LARGE_IN
     return TimeEnd;
 }
 
-
-
 void
 MessageToServer(socket_handle handle,sockaddr_in addr, u32 * packet_seq, u32 * remote_seq_number)
 {
     struct packet packet;
     packet.seq = *packet_seq++;
     packet.ack = *remote_seq_number;
-
-#if 0
-    for (i32 i = 0; i < ArrayCount(packet_received_queue);++i)
-    {
-        u32 bitmask = ((remote_seq_number in packet_received_queue) << i)
-            packet.ack_bit = packet.ack_bit | bitmask;
-    }
-#endif
 
     sprintf(packet.msg, "Hello, this is msg number %i", packet.seq); 
 
@@ -255,7 +241,8 @@ main()
     
     u32 packet_seq = 0;
     u32 remote_seq_number = 0;
-    u32 packet_received_queue[32] = {}; 
+    u32 remote_ack_bit = 0;
+    i32 remote_ack_head = 0;
 
     LARGE_INTEGER perf_freq;
     QueryPerformanceFrequency(&perf_freq); 
@@ -265,7 +252,7 @@ main()
     // Sleep will do granular scheduling up to 1ms
     timeBeginPeriod(1);
 
-    logn("Start sending msg to server");
+    logn("Start sending msg to server (rate speed %i packages per second)",packages_per_second);
     while ( keep_alive )
     {
         LARGE_INTEGER starting_time, ending_time, delta_ms;
@@ -274,7 +261,7 @@ main()
 
         logn("Sending msg");
         MessageToServer(handle, addr, &packet_seq, &remote_seq_number);
-        HandleRecv(handle, &remote_seq_number);
+        HandleRecv(handle, &remote_seq_number, &remote_ack_bit);
         
         // sleep expected time
         LARGE_INTEGER time_frame_elapsed = 
