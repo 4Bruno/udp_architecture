@@ -18,7 +18,6 @@
 #include "logger.h"
 #include <string.h>
 #include "atomic.h"
-#include "test_network.h"
 #include "protocol.h"
 
 #pragma comment( lib, "Winmm.lib" )
