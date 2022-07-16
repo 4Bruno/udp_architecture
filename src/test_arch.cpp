@@ -33,8 +33,8 @@ int main()
     //_chdir();
     SetCurrentDirectory(".\\build\\debug\\");
 
-    const char * server_exe_name = "test_server_udp_package_loss_handler.exe";
-    const char * client_exe_name = "test_network_udp_package_loss_handler.exe";
+    const char * server_exe_name = "udp_server.exe";
+    const char * client_exe_name = "udp_client.exe";
 
     STARTUPINFO startup_info = {};
     startup_info.cb = sizeof(startup_info);

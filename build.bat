@@ -15,10 +15,7 @@ cls
 
 pushd %build_path%
 
-rem cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\src\test_network_udp_raw.cpp ..\..\src\win32_network_udp.cpp
-cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\src\test_network_udp_package_loss_handler.cpp %platform_cpp_files%
-cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\src\test_server_udp_package_loss_handler.cpp %platform_cpp_files%
-rem cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\src\test_win32_high_resolution_timer.cpp
-rem cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\src\test_server_udp.cpp ..\..\src\win32_network_udp.cpp
+cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\src\udp_client.cpp %platform_cpp_files%
+cl /nologo /Od %CompilationFlags% /I ..\..\src  ..\..\src\udp_server.cpp %platform_cpp_files%
 
 popd
