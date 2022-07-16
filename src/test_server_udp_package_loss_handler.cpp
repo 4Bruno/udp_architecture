@@ -3,7 +3,6 @@
 #include "logger.h"
 #include <string.h>
 #include "atomic.h"
-#include "test_network.h"
 #include "MurmurHash3.h"
 #include "protocol.h"
 #include <direct.h>
@@ -14,11 +13,21 @@ static volatile int keep_alive = 1;
 struct client
 {
     u32 addr;
+    u32 port;
+    sockaddr_in addr_ip;
     client_status status;
-    LARGE_INTEGER last_update;
+    real_time last_update;
+    real_time last_message_from_server;
     struct client * next;
     FILE * fd;
     u32 fd_entry_count;
+    struct client ** entry;
+
+    u32 server_packet_seq;
+    u32 server_packet_seq_bit;
+    u32 client_remote_seq;
+    u32 client_remote_seq_bit;
+    queue_message queue_msg_to_send;
 };
 
 struct hash_map
@@ -29,10 +38,12 @@ struct hash_map
     i32 bucket_count;
     i32 bucket_first_free;
     void * bucket_free_ll;
+    void * entries_begin;
+    i32 entries_count;
 };
 
 u32
-ClientHashKey(u32 addr, struct hash_map * client_map)
+ClientHashKey(u32 addr, u32 port, struct hash_map * client_map)
 {
     u32 seed = 27398;
     u32 hashkey = 0;
@@ -72,9 +83,9 @@ CreateClientLog(struct client * client)
 {
 
     char addr_to_s[50];
-    sprintf(addr_to_s, ".\\clients\\%i", client->addr);
+    sprintf(addr_to_s, ".\\clients\\%i_%i", client->addr, client->port);
 
-    fopen_s(&client->fd,addr_to_s, "w+D");
+    fopen_s(&client->fd,addr_to_s, "w+");
     Assert(client->fd);
 
     log_entry entry;
@@ -84,19 +95,19 @@ CreateClientLog(struct client * client)
 
 
 struct client *
-Client(u32 addr,struct hash_map * client_map)
+Client(u32 addr, u32 port, struct hash_map * client_map)
 {
     struct client ** ptr_client = 0;
     struct client * client = 0;
     Assert(client_map->table_size > 0);
 
-    u32 hashkey = ClientHashKey(addr, client_map);
+    u32 hashkey = ClientHashKey(addr, port, client_map);
     ptr_client = (struct client **)client_map->table + hashkey;
     client = *ptr_client;
 
     while ( client )
     {
-        if (client->addr == addr)
+        if (client->addr == addr && client->port == port)
         {
             break;
         }
@@ -122,27 +133,57 @@ Client(u32 addr,struct hash_map * client_map)
             }
         }
 
+        // new client
         client->addr = addr;
+        client->port = port;
         client->next = 0;
         client->status = client_status_none;
         client->last_update = GetRealTime();
+        client->addr_ip = CreateSocketAddress( addr , port);
+        client->last_message_from_server.QuadPart = 0;
+#if 1
+        client->server_packet_seq = UINT_MAX;
+        client->server_packet_seq_bit = ~0;
+        client->client_remote_seq = UINT_MAX;
+        client->client_remote_seq_bit = ~0;
+#else
+        client->server_packet_seq = UINT_MAX - 345;
+        client->server_packet_seq_bit = ~0;
+        client->client_remote_seq = UINT_MAX - 650;
+        client->client_remote_seq_bit = ~0;
+#endif
+        memset(&client->queue_msg_to_send, 0, sizeof(client->queue_msg_to_send));
+
+        Assert(client_map->entries_begin);
+        Assert(client_map->bucket_count >= (client_map->entries_count + 1));
+
+        struct client ** entry_client = ((struct client **)client_map->entries_begin + client_map->entries_count++);
+        client->entry = entry_client;
+        *entry_client = client;
 
         CreateClientLog(client);
 
         *ptr_client = client;
+
+        logn("New client [%i.%i.%i.%i|%i]",
+                            (addr >> 24),
+                            (addr >> 16)  & 0xFF0000,
+                            (addr >> 8)   & 0xFF00,
+                            (addr >> 0)   & 0xFF,
+                            port);
     }
 
     return client;
 }
 
 void
-RemoveClient(u32 addr, struct hash_map * client_map)
+RemoveClient(u32 addr, u32 port, struct hash_map * client_map)
 {
-    u32 hashkey = ClientHashKey(addr,client_map);
+    u32 hashkey = ClientHashKey(addr,port, client_map);
     struct client ** parent = (struct client **)client_map->table + hashkey;
     Assert(parent);
     struct client * child = *parent;
-    while (child->addr != addr)
+    while (child->addr != addr || child->port != port)
     {
         parent = &child->next;
         child = child->next;
@@ -150,8 +191,33 @@ RemoveClient(u32 addr, struct hash_map * client_map)
 
     (*parent) = (*parent)->next;
 
+    logn("Removing client [%i.%i.%i.%i|%i]",
+                        (addr >> 24),
+                        (addr >> 16)  & 0xFF0000,
+                        (addr >> 8)   & 0xFF00,
+                        (addr >> 0)   & 0xFF,
+                        port);
+
     child->addr = 0;
+    child->port = 0;
     child->next = 0;
+
+    Assert(child->entry);
+    struct client ** entry_to_remove = child->entry;
+    struct client ** last_entry = (struct client **)client_map->entries_begin + client_map->entries_count - 1;
+
+    if ((*entry_to_remove) != (*last_entry))
+    {
+        struct client * last_client  = (*last_entry);
+        last_client->entry = entry_to_remove;
+        (*entry_to_remove) = last_client;
+        *last_entry = 0;
+    }
+
+    client_map->entries_count -= 1;
+
+    child->entry = 0;
+
     if (child->fd)
     {
         fclose(child->fd);
@@ -168,31 +234,9 @@ RemoveClient(u32 addr, struct hash_map * client_map)
 void
 RemoveClient(struct client * client, struct hash_map * client_map)
 {
-    RemoveClient(client->addr, client_map);
+    RemoveClient(client->addr, client->port, client_map);
 }
 
-#define Kilobytes(x) 1024 * x
-#define Megabytes(x) 1024 * Kilobytes(x)
-#define Gigabytes(x) 1024 * Megabytes(x)
-
-#define PushStruct(arena, s) (s *)PushSize_(arena, sizeof(s))
-#define PushSize(arena, s) (void*)PushSize_(arena, s)
-struct memory_arena
-{
-    void * base;
-    u32 size;
-    u32 max_size;
-};
-
-void *
-PushSize_(memory_arena * arena, i32 size)
-{
-    Assert( (arena->size + size) <= arena->max_size );
-    arena->size += size;
-    void * base = (char *)arena->base + arena->size;
-
-    return base;
-}
 
 struct server
 {
@@ -283,6 +327,9 @@ CreateServer(memory_arena * server_arena, u32 PermanentMemorySize, u32 Transient
     memset(server->client_map.bucket_list, 0, size_buckets);
 
     server->client_map.bucket_first_free = 0;
+
+    // this is an array of pointers to entries in use
+    server->client_map.entries_begin = PushArray(&server->permanent_arena, server->client_map.bucket_count, struct client *);
     
     return server;
 }
@@ -291,6 +338,78 @@ void
 ShutdownServer(struct server * server)
 {
     CloseSocket(server->handle);
+}
+
+inline i32
+IsSeqGreaterThan(u32 a, u32 b)
+{
+    const u32 half = UINT_MAX / 2;
+
+    i32 result = 
+        ((a > b) && ((a - b) <= half)) ||
+        ((a < b) && ((b - a) >  half));
+
+    return result;
+
+}
+
+inline i32
+IsSeqGreaterThan(u16 a, u16 b)
+{
+    const u32 half = USHRT_MAX / 2;
+
+    i32 result = 
+        ((a > b) && ((a - b) <= half)) ||
+        ((a < b) && ((b - a) >  half));
+
+    return result;
+}
+
+void
+CreatePackages(struct queue_message * queue, i32 packet_type, void * data, u32 size)
+{
+    i32 order = 0;
+    i32 id = (queue->last_id++ & ((1 << 8) - 1));
+
+    while (size > 0)
+    {
+        u32 used_size = min(size, sizeof(queue->messages[0].data));
+
+        Assert(
+                ((queue->next + 1) & (ArrayCount(queue->messages) - 1)) !=
+                (queue->begin & (ArrayCount(queue->messages) - 1))
+              );
+
+
+        struct message * pck = 
+            queue->messages + (queue->next++ & (ArrayCount(queue->messages) - 1));
+
+        pck->header.id = id;
+        pck->header.order = order;
+        pck->header.message_type = packet_type;
+        pck->header.len = used_size;
+
+        memcpy(pck->data, data, used_size);
+
+        size -= used_size;
+        order += 1;
+    }
+}
+
+void 
+printBits(size_t const size, void const * const ptr)
+{
+    unsigned char *b = (unsigned char*) ptr;
+    unsigned char byte;
+    int i, j;
+    
+    for (i = size-1; i >= 0; i--) {
+        for (j = 7; j >= 0; j--) {
+            byte = (b[i] >> j) & 1;
+            printf("%u", byte);
+        }
+    }
+    puts("");
 }
 
 int
@@ -322,120 +441,309 @@ main()
     server->seed = 12312312;
     srand(server->seed);
 
+    u32 packages_per_second = 10;
+    r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
+    real_time perf_freq = GetClockResolution();
+
+    real_time time_last_msg_to_client;
+
     while ( server->keep_alive )
     {
-        struct packet packet_data;
-        u32 max_packet_size = sizeof( packet_data );
+        real_time starting_time, ending_time, delta_ms;
+        starting_time = GetRealTime();
 
-        sockaddr_in from;
-        socklen_t fromLength = sizeof( from );
+        i32 any_pkc_sent = 0;
 
-        int bytes = recvfrom( server->handle, 
-                (char *)&packet_data, max_packet_size, 
-                0, 
-                (sockaddr*)&from, &fromLength );
-
-        u32 from_address = ntohl( from.sin_addr.s_addr );
-        u32 from_port = ntohs( from.sin_port );
-
-        if ( bytes == SOCKET_ERROR )
+        for (int entry_index = 0;
+                 entry_index < server->client_map.entries_count;
+                 ++entry_index)
         {
-            i32 err = socket_errno;
-            if (err != EWOULDBLOCK && err != WSAECONNRESET)
-            {
-                logn("Error recvfrom(). %s", GetLastSocketErrorMessage());
-                return 1;
-            }
+            struct client ** client_entry = (struct client **)server->client_map.entries_begin + entry_index;
+            struct client * client = (*client_entry);
 
-            if (err == EWOULDBLOCK)
-            {
-                Sleep(10);
-            }
-            else if (err == WSAECONNRESET)
-            {
-                // conn reset in win32
-                // handle it via time out
-            }
+            u32 bit_to_check = (1 << ((client->server_packet_seq + 1) & (32 - 1)));
+            i32 is_packet_ack = (client->server_packet_seq_bit & bit_to_check) == bit_to_check;
 
+            if (!is_packet_ack)
+            {
+                //logn("Package was lost! %u", (client->server_packet_seq - 31));
+                // TODO:
+                // is this a critical package? - issue 
+            }
         }
-        else if ( bytes == 0 )
+
         {
-            Assert(0);
-            logn("No more data. Closing.");
-            //break;
-        }
-        else
-        {
-            i32 lost_on_purpose = (rand() % 64) == 0;
-            if (!lost_on_purpose)
+            struct packet recv_datagram;
+            u32 max_packet_size = sizeof( recv_datagram );
+
+            sockaddr_in from;
+            socklen_t fromLength = sizeof( from );
+
+            int bytes = recvfrom( server->handle, 
+                    (char *)&recv_datagram, max_packet_size, 
+                    0, 
+                    (sockaddr*)&from, &fromLength );
+
+            u32 from_address = ntohl( from.sin_addr.s_addr );
+            u32 from_port = ntohs( from.sin_port );
+
+            if ( bytes == SOCKET_ERROR )
             {
-                struct client * client = Client(from_address, &server->client_map);
-                // process received packet
+                i32 err = socket_errno;
+                if (err != EWOULDBLOCK && err != WSAECONNRESET)
+                {
+                    logn("Error recvfrom(). %s", GetLastSocketErrorMessage());
+                    return 1;
+                }
+
+                if (err == EWOULDBLOCK)
+                {
+                    Sleep(10);
+                }
+                else if (err == WSAECONNRESET)
+                {
+                    // conn reset in win32
+                    // handle it via time out
+                }
+
+            }
+            else if ( bytes == 0 )
+            {
+                Assert(0);
+                logn("No more data. Closing.");
+                //break;
+            }
+            else
+            {
+                struct client * client = Client(from_address, from_port, &server->client_map);
+
+                u32 recv_packet_seq = recv_datagram.header.seq;
+                u32 recv_packet_ack     = recv_datagram.header.ack;
+                u32 recv_packet_ack_bit = recv_datagram.header.ack_bit;
+
+                Assert( (client->server_packet_seq == recv_packet_ack) || IsSeqGreaterThan(client->server_packet_seq, recv_packet_ack));
+
+                struct message * messages[8];
+                u32 msg_count = recv_datagram.header.messages;
+                // datagram with 492b max payload can have at most
+                // 7.6 messages given that each msg has 32b header + 32b data
+                Assert(recv_datagram.header.messages <= sizeof(messages));
+
+                u32 begin_data_offset = 0;
+                for (int msg_index = 0;
+                        msg_index < msg_count;
+                        ++msg_index)
+                {
+                    struct message ** msg = messages + msg_index;
+                    *msg = (struct message *)recv_datagram.data + begin_data_offset;
+                    begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
+                }
+
+                i32 lost_on_purpose = (rand() % 10) == 0;
+
+                //if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
+
+                if (!lost_on_purpose)
+                {
+                    // process received packet
 #if 0
-                logn("[%i.%i.%i.%i] Message (%u) received %s", 
-                        (from_address >> 24),
-                        (from_address >> 16)  & 0xFF0000,
-                        (from_address >> 8)   & 0xFF00,
-                        (from_address >> 0)   & 0xFF,
-                        packet_data.seq, packet_data.msg); 
+                    logn("[%i.%i.%i.%i] Message (%u) received %s", 
+                            (from_address >> 24),
+                            (from_address >> 16)  & 0xFF0000,
+                            (from_address >> 8)   & 0xFF00,
+                            (from_address >> 0)   & 0xFF,
+                            recv_datagram.seq, recv_datagram.msg); 
 #endif
+                    switch (client->status)
+                    {
+                        case client_status_in_game:
+                            {
+                            } break;
+                        case client_status_auth:
+                            {
+                            } break;
+                        case client_status_none:
+                            {
+                                const char reply[] = "Checking credentials";
 
-                struct packet ack;
-                ack.seq = packet_data.seq;
-                ack.ack = packet_data.seq;
-                switch (client->status)
-                {
-                    case client_status_in_game:
+                                for (int msg_index = 0;
+                                        msg_index < msg_count;
+                                        ++msg_index)
+                                {
+                                    struct message * msg = messages[msg_index];
+                                    if (msg->header.message_type == package_type_auth)
+                                    {
+                                        Assert(msg->header.len == sizeof(udp_auth));
+                                        struct udp_auth * login_data = (udp_auth *)msg->data;
+
+                                        log_entry entry;
+                                        sprintf(entry.msg,"user:%s, pwd:%s\n",login_data->user, login_data->pwd);
+                                        AddClientLogEntry(client,&entry);
+
+                                        client->status = client_status_trying_auth;
+
+                                        CreatePackages(&client->queue_msg_to_send, 0, (void *)reply, sizeof(reply));
+
+                                        break;
+                                    }
+                                }
+                            } break;
+                        case client_status_trying_auth:
+                            {
+                            };
+                        default:
+                            {
+                            } break;
+                    }
+
+                    /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
+                    // unless crafted package, recv package should always be higher than our record
+                    Assert(IsSeqGreaterThan(recv_packet_seq,client->client_remote_seq));
+
+                    // TODO: what if we lose all packages for 1 > s?
+                    // should we simply reset to 0 all bits and move on
+                    // TEST THIS
+                    // int on purpose check abs (to look at no branching method)
+                    // https://graphics.stanford.edu/~seander/bithacks.html#IntegerAbs
+                    i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - client->client_remote_seq));
+                    Assert(delta_local_remote_seq < 32);
+
+                    u32 sync_remote_seq_bit = client->client_remote_seq_bit;
+                    u32 bit_mask = 0;
+                    u32 remote_bit_index = (recv_packet_seq & 31);
+
+                    // if delay is beyond 1 s we nullify our bit array
+                    if (delta_local_remote_seq < 32)
+                    {
+                        u32 local_bit_index = (client->client_remote_seq & 31);
+
+                        u32 lo = min(remote_bit_index, local_bit_index);
+                        u32 hi = max(remote_bit_index, local_bit_index);
+                        u32 max_minus_hi = (31 - hi);
+
+                        bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+
+                        //     hi        low 
+                        //      v         v
+                        // 00000111111111110000
+                        if (remote_bit_index >= local_bit_index)
                         {
-                        } break;
-                    case client_status_auth:
-                        {
-                        } break;
-                    case client_status_none:
-                        {
-                            struct udp_auth * login_data = (udp_auth *)packet_data.msg;
-                            //sprintf(ack.msg, "Requires authentication. Received %s and %s", login_data->user, login_data->pwd);
-                            log_entry entry;
-                            sprintf(entry.msg,"user:%s, pwd:%s\n",login_data->user, login_data->pwd);
-                            AddClientLogEntry(client,&entry);
-                            sprintf(ack.msg, "I am checking your use/pwd");
-                        } break;
-                    default:
-                        {
-                        } break;
+                            //     hi        low 
+                            //      v         v
+                            // 11111000000000001111
+                            bit_mask = ~bit_mask; 
+                        }
+
+                        bit_mask = bit_mask ^ ((u32)1 << lo);
+                    }
+
+                    client->client_remote_seq_bit = (client->client_remote_seq_bit & bit_mask) | ((u32)1 << remote_bit_index);
+                    client->client_remote_seq = recv_packet_seq;
                 }
 
-                //sprintf(ack.msg, "I got our msg %u", packet_data.seq);
-                if (SendPackage(server->handle,from, (void *)&ack, sizeof(ack)) == SOCKET_ERROR)
+                /* UPDATE OUR BIT ARRAY OF PACKAGES SENT CONFIRMED BY PEER */
+
                 {
-                    logn("Error sending ack package %u. %s", ack.seq, GetLastSocketErrorMessage());
-                    server->keep_alive = 0;
+                    // unless crafted package, ack package should refer to lower
+                    Assert(
+                            (client->server_packet_seq == recv_packet_ack) || 
+                            IsSeqGreaterThan(client->server_packet_seq,recv_packet_ack)
+                            );
+                    u32 delta_seq_and_ack = (client->server_packet_seq - recv_packet_ack);
+                    u32 bit_mask = 0;
+
+                    if (delta_seq_and_ack < 32)
+                    {
+                        u32 remote_bit_index = (recv_packet_ack & 31);
+                        u32 local_bit_index = (client->server_packet_seq & 31);
+
+                        u32 lo = min(remote_bit_index, local_bit_index);
+                        u32 hi = max(remote_bit_index, local_bit_index);
+                        u32 max_minus_hi = (31 - hi);
+
+                        bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+
+                        //     hi        low 
+                        //      v         v
+                        // 00000111111111110000
+                        if (local_bit_index >= remote_bit_index)
+                        {
+                            //     hi        low 
+                            //      v         v
+                            // 11111000000000001111
+                            bit_mask = ~bit_mask; 
+                        }
+
+                        bit_mask = bit_mask ^ ((u32)1 << lo);
+                    }
+
+                    client->server_packet_seq_bit = (recv_packet_ack_bit & bit_mask);
+
+                    client->last_update = GetRealTime();
                 }
             }
         }
 
-        HANDLE hFind = INVALID_HANDLE_VALUE;
-        WIN32_FIND_DATAA ffd;
-        hFind = FindFirstFile(".\\clients\\*", &ffd);
-        if (hFind != INVALID_HANDLE_VALUE)
+        for (int entry_index = 0;
+                 entry_index < server->client_map.entries_count;
+                 ++entry_index /* decrement if client removed */)
         {
-            do
+            struct client ** client_entry = (struct client **)server->client_map.entries_begin + entry_index;
+            struct client * client = (*client_entry);
+
+            delta_time dt_time = GetTimeDiff(GetRealTime(),client->last_update,clock_freq);
+
+            //logn("Time since client send msg %lli", dt_time);
+
+            if (dt_time > 5000)
             {
-                if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                logn("Removing client timeout 10s");
+                RemoveClient(client, &server->client_map);
+                entry_index -= 1;
+            }
+
+            if (GetTimeDiff(GetRealTime(), client->last_message_from_server,clock_freq) > expected_ms_per_package)
+            {
+
+                // signal next seq package as not received
+                client->server_packet_seq += 1;
+                client->server_packet_seq_bit = 
+                    (client->server_packet_seq_bit & ~(1 << (client->server_packet_seq & 31)));
+
+                struct packet packet;
+                packet.header.seq       = client->server_packet_seq;
+                packet.header.ack       = client->client_remote_seq;
+                packet.header.ack_bit   = client->client_remote_seq_bit;
+                packet.header.protocol  = PROTOCOL_ID;
+                packet.header.messages  = 0;
+
+                u32 current_size = 0;
+                queue_message * queue = &client->queue_msg_to_send;
+                for (int i = queue->begin; 
+                        i != queue->next; 
+                        i = (++i & (ArrayCount(queue->messages) - 1)))
                 {
-                    u32 addr = atol(ffd.cFileName);
-                    struct client * client = Client(addr, &server->client_map);
-                    log_entry entry;
-                    ReadLastClientEntry(client, &entry);
-                    delta_time dt_time = GetTimeDiff(GetRealTime(),entry.update,clock_freq);
-                    logn("Time since client send msg %lli", dt_time);
-                    if (dt_time > 5000)
+                    struct message * msg = queue->messages + i;
+                    u32 size = msg ->header.len + sizeof(message_header);
+                    memcpy(packet.data + current_size, msg, size);
+
+                    current_size += size;
+                    queue->begin += 1;
+                    packet.header.messages += 1;
+                    if (current_size >= sizeof(packet.data))
                     {
-                        logn("Removing client timeout 10s");
-                        RemoveClient(from_address, &server->client_map);
+                        break;
                     }
                 }
-            } while (FindNextFile(hFind, &ffd) != 0);
+
+                if (SendPackage(server->handle,client->addr_ip, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
+                {
+                    logn("Error sending ack package %u. %s", packet.header.seq, GetLastSocketErrorMessage());
+                    server->keep_alive = 0;
+                }
+                
+                client->last_message_from_server = GetRealTime();
+            }
         }
     }
 

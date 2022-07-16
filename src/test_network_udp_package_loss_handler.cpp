@@ -32,20 +32,6 @@
 
 static volatile int keep_alive = 1;
 
-struct client_handler
-{
-#define BITARRAY_SIZE (sizeof(size_t) * 8)
-// ((32 * 60 * 1) / BITARRAY_SIZE) = 1920, round up to 2048 to be power of 2 for & modulo bit op
-// 1920 / 64 = 30
-// 2048 / 64 = 32
-// Must be power of 2
-#define SENT_PACKAGES_BIT_BLOCKS 32 
-    size_t sent_seq_bit[SENT_PACKAGES_BIT_BLOCKS];
-    int head_block;
-    u32 seq;
-    real_time sent_pck_time[SENT_PACKAGES_BIT_BLOCKS * BITARRAY_SIZE];
-};
-
 struct package_info
 {
     real_time time_sent;
@@ -87,71 +73,6 @@ IsSeqGreaterThan(u16 a, u16 b)
 }
 
 
-int
-HandleRecv(socket_handle handle, u32 * remote_seq_number, u32 * remote_ack_bit, package_queue * received_queue)
-{
-    int recv_status = -1;
-
-    struct packet packet_data;
-    u32 max_packet_size = sizeof( packet_data );
-
-    sockaddr_in from;
-    socklen_t fromLength = sizeof( from );
-
-    int bytes = recvfrom( handle, 
-            (char *)&packet_data, max_packet_size, 
-            0, 
-            (sockaddr*)&from, &fromLength );
-
-    if ( bytes == SOCKET_ERROR )
-    {
-        if (socket_errno != EWOULDBLOCK)
-        {
-            logn("Error recvfrom(). %s", GetLastSocketErrorMessage());
-        }
-    }
-    else if ( bytes == 0 )
-    {
-        logn("No more data. Closing.");
-        recv_status = 0;
-    }
-    else
-    {
-
-        unsigned int from_address = 
-            ntohl( from.sin_addr.s_addr );
-
-        unsigned int from_port = 
-            ntohs( from.sin_port );
-
-        // process received packet
-        logn("[%i.%i.%i.%i] Message (%i) received %s", 
-                (from_address >> 24),
-                (from_address >> 16)  & 0xFF0000,
-                (from_address >> 8)   & 0xFF00,
-                (from_address >> 0)   & 0xFF,
-                packet_data.seq, packet_data.msg); 
-
-        recv_status = fromLength;
-
-        if (IsSeqGreaterThan(*remote_seq_number,packet_data.ack))
-        {
-            *remote_seq_number = packet_data.ack;
-        }
-
-        for (int i = 0; i < 32;++i)
-        {
-            i32 mask = (1 << i);
-            i32 signaled_received = packet_data.ack_bit & mask;
-            if (signaled_received)
-            {
-            }
-        }
-    }
-
-    return recv_status;
-}
-
 #if _WIN32
 BOOL WINAPI 
 HandleCtlC(DWORD dwCtrlType)
@@ -181,43 +102,6 @@ InitializeTerminateSignalHandler()
     SetConsoleCtrlHandler(HandleCtlC, true);
 #else
 #endif
-}
-
-void
-MessageToServer(socket_handle handle,sockaddr_in addr, 
-                u32 * packet_seq, 
-                u32 * remote_seq_number, u32 * remote_ack_bit,
-                package_queue * received_queue)
-{
-    struct packet packet;
-    packet.seq = *packet_seq++;
-    packet.ack = *remote_seq_number;
-    packet.ack_bit = *remote_ack_bit;
-
-    LONGLONG time_sent = received_queue->packages[received_queue->head].time_sent.QuadPart;
-    LONGLONG time_received = received_queue->packages[received_queue->head].time_received.QuadPart;
-    LONGLONG delta_time_ms = (time_received - time_sent) * (1.0f / 1000.0f);
-
-    if (!received_queue->packages[received_queue->head].ack)
-    {
-        logn("Package was not acknowledge by server!");
-    }
-
-#if 0
-    for (i32 i = 0; i < ArrayCount(packet_received_queue);++i)
-    {
-        u32 bitmask = ((remote_seq_number in packet_received_queue) << i)
-            packet.ack_bit = packet.ack_bit | bitmask;
-    }
-#endif
-
-    sprintf(packet.msg, "Hello, this is msg number %i", packet.seq); 
-
-    if (SendPackage(handle,addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
-    {
-        logn("Error sending package %i. %s", packet.seq, GetLastSocketErrorMessage());
-        keep_alive = 0;
-    }
 }
 
 u32
@@ -272,30 +156,39 @@ printBits(size_t const size, void const * const ptr)
     puts("");
 }
 
-real_time *
-GetPckTime(struct client_handler * client, u32 ack)
+void
+CreatePackages(struct queue_message * queue, i32 packet_type, void * data, u32 size)
 {
-    u32 delta_pck_ack = client->seq - ack - 1;
-    i32 offset_block = ((client->head_block + 1) * BITARRAY_SIZE) - delta_pck_ack; 
-    real_time * time = client->sent_pck_time + offset_block;
-    return time;
-}
+    i32 order = 0;
+    i32 id = (queue->last_id++ & ((1 << 8) - 1));
 
-i32
-IsPacketAck(struct client_handler * client, u32 ack)
-{
-    u32 delta_pck_ack = client->seq - ack - 1;
-    i32 offset_block = delta_pck_ack / BITARRAY_SIZE;
-    i32 offset_block_index = (client->head_block - offset_block) & (SENT_PACKAGES_BIT_BLOCKS - 1);
-    i32 offset_bitarray = (ack & (BITARRAY_SIZE - 1));
-    size_t mask = ((size_t)1 << offset_bitarray);
-    i32 is_ack = (client->sent_seq_bit[offset_block_index] & mask) == mask;
+    while (size > 0)
+    {
+        u32 used_size = min(size, sizeof(queue->messages[0].data));
 
-    return is_ack;
+        Assert(
+                ((queue->next + 1) & (ArrayCount(queue->messages) - 1)) !=
+                (queue->begin & (ArrayCount(queue->messages) - 1))
+              );
+
+
+        struct message * pck = 
+            queue->messages + (queue->next++ & (ArrayCount(queue->messages) - 1));
+
+        pck->header.id = id;
+        pck->header.order = order;
+        pck->header.message_type = packet_type;
+        pck->header.len = used_size;
+
+        memcpy(pck->data, data, used_size);
+
+        size -= used_size;
+        order += 1;
+    }
 }
 
 int
-main()
+main(int argc, char * argv[])
 {
     InitializeTerminateSignalHandler();
 
@@ -306,6 +199,13 @@ main()
 
     socket_handle handle = 0;
     int port = 30000;
+
+    if (argc > 1)
+    {
+        char * arg_port = argv[1];
+        port = atoi(arg_port);
+    }
+
 #if 1
     u32 ip_addr = IP_ADDR( 127, 0 , 0 , 1);
 #else
@@ -317,7 +217,7 @@ main()
 #endif
 
     // server port
-    sockaddr_in addr = CreateSocketAddress( ip_addr, port);
+    sockaddr_in server_addr = CreateSocketAddress( ip_addr, port);
     SOCKET_RETURN_ON_ERROR(CreateSocketUdp(&handle));
     BOOL opt_val = true;
     int opt_len = sizeof(opt_val);
@@ -325,28 +225,20 @@ main()
     SOCKET_RETURN_ON_ERROR(BindSocket(handle, 0));
     SOCKET_RETURN_ON_ERROR(SetSocketNonBlocking(handle));
 
-    u32 packet_seq = 0;
-    u32 remote_seq_number = 0;
-    u32 remote_ack_bit = 0;
-    i32 remote_ack_head = 0;
+#if 1
+    u32 packet_seq = UINT_MAX;
+    u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
+    u32 remote_seq = UINT_MAX;
+    u32 remote_seq_bit = ~0;
+#else
+    u32 packet_seq = UINT_MAX - 640;
+    u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
+    u32 remote_seq = UINT_MAX - 350;
+    u32 remote_seq_bit = ~0;
+#endif
+
     package_queue packages_received_ring = {};
     packages_received_ring.head = 0;
-    client_handler client;
-    client.head_block = 0;
-    client.seq = BITARRAY_SIZE; // tells max seq reference in current head
-    for (int i = 0; i < ArrayCount(client.sent_seq_bit);++i)
-    {
-        client.sent_seq_bit[i] = 0;
-    }
-
-    // set initial prior block as acknowledge. This is to avoid corner case
-    // at initialization
-    client.sent_seq_bit[ArrayCount(client.sent_seq_bit) - 1] = ~(size_t)0;
-
-    for (int i = 0; i < ArrayCount(packages_received_ring.packages);++i)
-    {
-        packages_received_ring.packages[i].ack = 1;
-    }
 
     real_time perf_freq = GetClockResolution();
 
@@ -360,29 +252,199 @@ main()
 
     client_status my_status_with_server = client_status_none;
 
+    queue_message queue_msg_to_send;
+    memset(&queue_msg_to_send, 0, sizeof(queue_message));
+
     while ( keep_alive )
     {
         real_time starting_time, ending_time, delta_ms;
 
         starting_time = GetRealTime();
 
-        //MessageToServer(handle, addr, &packet_seq, &remote_seq_number, &remote_ack_bit, &packages_received_ring);
+        i32 any_pkc_sent = 0;
+
+        u32 bit_to_check = (1 << ((packet_seq + 1) & (32 - 1)));
+        i32 is_packet_ack = (packet_seq_bit & bit_to_check) == bit_to_check;
+
+        if (!is_packet_ack)
+        {
+            logn("Package was lost! %u", (packet_seq - 31));
+            // TODO:
+            // is this a critical package? - issue 
+        }
+
+
+        {
+            int recv_status = -1;
+
+            struct packet recv_datagram;
+            u32 max_packet_size = sizeof( struct packet);
+
+            sockaddr_in from;
+            socklen_t fromLength = sizeof( from );
+
+            int bytes = recvfrom( handle, 
+                    (char *)&recv_datagram, max_packet_size, 
+                    0, 
+                    (sockaddr*)&from, &fromLength );
+
+            if ( bytes == SOCKET_ERROR )
+            {
+                if (socket_errno != EWOULDBLOCK)
+                {
+                    logn("Error recvfrom(). %s", GetLastSocketErrorMessage());
+                }
+            }
+            else if ( bytes == 0 )
+            {
+                logn("No more data. Closing.");
+                recv_status = 0;
+            }
+            else
+            {
+                unsigned int from_address = 
+                    ntohl( from.sin_addr.s_addr );
+
+                unsigned int from_port = 
+                    ntohs( from.sin_port );
+
+                u32 recv_packet_seq     = recv_datagram.header.seq;
+                u32 recv_packet_ack     = recv_datagram.header.ack;
+                u32 recv_packet_ack_bit = recv_datagram.header.ack_bit;
+
+                Assert( (packet_seq == recv_packet_ack) || IsSeqGreaterThan(packet_seq, recv_packet_ack));
+
+                struct message * messages[8];
+                u32 msg_count = recv_datagram.header.messages;
+                // datagram with 492b max payload can have at most
+                // 7.6 messages given that each msg has 32b header + 32b data
+                Assert(recv_datagram.header.messages <= sizeof(messages));
+
+                u32 begin_data_offset = 0;
+                for (int msg_index = 0;
+                        msg_index < msg_count;
+                        ++msg_index)
+                {
+                    struct message ** msg = messages + msg_index;
+                    *msg = (struct message *)recv_datagram.data + begin_data_offset;
+                    begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
+                }
+#if 0
+                logn("[%i.%i.%i.%i] Message (%i) received %s", 
+                        (from_address >> 24),
+                        (from_address >> 16)  & 0xFF0000,
+                        (from_address >> 8)   & 0xFF00,
+                        (from_address >> 0)   & 0xFF,
+                        recv_datagram.seq, recv_datagram.msg); 
+#endif
+                recv_status = fromLength;
+                {
 
 #if 0
-        LONGLONG time_sent = received_queue->packages[received_queue->head].time_sent.QuadPart;
-        LONGLONG time_received = received_queue->packages[received_queue->head].time_received.QuadPart;
-        LONGLONG delta_time_ms = (time_received - time_sent) * (1.0f / 1000.0f);
-        if (!received_queue->packages[received_queue->head].ack)
-        {
-            logn("Package was not acknowledge by server!");
-        }
-        for (i32 i = 0; i < ArrayCount(packet_received_queue);++i)
-        {
-            u32 bitmask = ((remote_seq_number in packet_received_queue) << i)
-                packet.ack_bit = packet.ack_bit | bitmask;
-        }
+                    // TODO: what if we lose all packages for 1 > s?
+                    // should we simply reset to 0 all bits and move on
+                    // TEST THIS
+                    i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
+                    Assert(delta_local_remote_seq < 32);
+                    if (delta_local_remote_seq < 32)
+                    {
+                        if (IsSeqGreaterThan(recv_packet_seq,remote_seq))
+                        {
+                            Assert(IsSeqGreaterThan(recv_packet_seq, remote_seq));
+
+                            u32 remote_bit_index = ((remote_seq + 1) & 31);
+                            u32 packet_seq_index = (recv_packet_seq & 31);
+
+                            u32 bit_mask = ~(((u32)~0 << (remote_bit_index + (31 - packet_seq_index))) >> (31 - packet_seq_index));
+                            remote_seq_bit = remote_seq_bit & bit_mask;
+                            remote_seq_bit = remote_seq_bit | (1 << packet_seq_index);
+                        }
+                        else
+                        {
+                            remote_seq_bit = remote_seq_bit | (1 << (recv_packet_seq & 31));
+                        }
+
+                        remote_seq = recv_packet_seq;
+                    }
 #endif
-        i32 any_pkc_sent = 0;
+                    /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
+                    // unless crafted package, recv package should always be higher than our record
+                    Assert(IsSeqGreaterThan(recv_packet_seq,remote_seq));
+
+                    // TODO: what if we lose all packages for 1 > s?
+                    // should we simply reset to 0 all bits and move on
+                    // TEST THIS
+                    // int on purpose check abs (to look at no branching method)
+                    // https://graphics.stanford.edu/~seander/bithacks.html#IntegerAbs
+                    i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
+                    Assert(delta_local_remote_seq < 32);
+
+                    u32 sync_remote_seq_bit = remote_seq_bit;
+                    u32 bit_mask = 0;
+                    u32 remote_bit_index = (recv_packet_seq & 31);
+
+                    if (delta_local_remote_seq < 32)
+                    {
+                        u32 local_bit_index = (remote_seq & 31);
+
+                        u32 lo = min(remote_bit_index, local_bit_index);
+                        u32 hi = max(remote_bit_index, local_bit_index);
+                        u32 max_minus_hi = (31 - hi);
+
+                        u32 bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+
+                        //     hi        low 
+                        //      v         v
+                        // 00000111111111110000
+                        if (remote_bit_index >= local_bit_index)
+                        {
+                            //     hi        low 
+                            //      v         v
+                            // 11111000000000001111
+                            bit_mask = ~bit_mask; 
+                        }
+
+                        bit_mask = bit_mask ^ ((u32)1 << lo);
+                    }
+
+                    remote_seq_bit = (remote_seq_bit & bit_mask) | ((u32)1 << remote_bit_index);
+                    remote_seq = recv_packet_seq;
+                }
+
+                /* UPDATE OUR BIT ARRAY OF PACKAGES SENT CONFIRMED BY PEER */
+
+                u32 delta_seq_and_ack = (packet_seq - recv_packet_ack);
+                u32 bit_mask = 0;
+
+                // TODO: peer is ack packages 1 s old, should we issue a sync flag?
+                if (delta_seq_and_ack <= 31)
+                {
+                    u32 remote_bit_index = (recv_packet_ack & 31);
+                    u32 local_bit_index = (packet_seq & 31);
+
+                    u32 lo = min(remote_bit_index, local_bit_index);
+                    u32 hi = max(remote_bit_index, local_bit_index);
+                    u32 max_minus_hi = (31 - hi);
+
+                    bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+
+                    //     hi        low 
+                    //      v         v
+                    // 00000111111111110000
+                    if (local_bit_index >= remote_bit_index)
+                    {
+                        //     hi        low 
+                        //      v         v
+                        // 11111000000000001111
+                        bit_mask = ~bit_mask; 
+                    }
+
+                    bit_mask = bit_mask ^ ((u32)1 << lo);
+                }
+
+                packet_seq_bit = (recv_packet_ack_bit & bit_mask);
+            }
+        }
 
         switch (my_status_with_server)
         {
@@ -397,141 +459,64 @@ main()
             } break;
             case client_status_none:
             {
-                struct packet packet;
-                packet.seq = packet_seq++;
-                packet.ack = remote_seq_number;
-                packet.ack_bit = remote_ack_bit;
-                packet.protocol = PROTOCOL_ID;
-
-                real_time * time = GetPckTime(&client, 0);
-                *time = GetRealTime();
-
                 struct udp_auth login_data;
                 sprintf(login_data.user,"%s","anonymous");
                 sprintf(login_data.pwd,"%s","1234");
-                memcpy(packet.msg, &login_data, sizeof(udp_auth));
-                if (SendPackage(handle,addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
-                {
-                    logn("Error sending package %i. %s", packet.seq, GetLastSocketErrorMessage());
-                    keep_alive = 0;
-                }
-                any_pkc_sent = 1;
+
                 my_status_with_server = client_status_trying_auth;
+
+                CreatePackages(&queue_msg_to_send, package_type_auth, (void *)&login_data, sizeof(udp_auth));
+
             } break;
             default:
             {
             } break;
         }
 
-        if (!any_pkc_sent)
+
+        // set current seq as not received
+        packet_seq += 1;
+        packet_seq_bit = (packet_seq_bit & ~(1 << (packet_seq & 31)));
+
+        struct packet packet;
+        packet.header.seq       = packet_seq;
+        packet.header.ack       = remote_seq;
+        packet.header.ack_bit   = remote_seq_bit;
+        packet.header.protocol  = PROTOCOL_ID;
+        packet.header.messages  = 0;
+
+        u32 current_size = 0;
+        queue_message * queue = &queue_msg_to_send;
+        for (int i = queue->begin; 
+                 i != queue->next; 
+                 i = (++i & (ArrayCount(queue->messages) - 1)))
         {
-            struct packet packet;
-            packet.seq = packet_seq++;
-            packet.ack = remote_seq_number;
-            packet.ack_bit = remote_ack_bit;
-            packet.protocol = PROTOCOL_ID;
+            struct message * msg = queue->messages + i;
+            u32 size = msg ->header.len + sizeof(message_header);
+            memcpy(packet.data + current_size, msg, size);
 
-            real_time * time = GetPckTime(&client, packet.seq);
-            *time = GetRealTime();
-
-            sprintf(packet.msg,"keek alive");
-            if (SendPackage(handle,addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
+            current_size += size;
+            queue->begin += 1;
+            packet.header.messages += 1;
+            if (current_size >= sizeof(packet.data))
             {
-                logn("Error sending package %i. %s", packet.seq, GetLastSocketErrorMessage());
-                keep_alive = 0;
+                break;
             }
         }
 
-
-        if (!IsPacketAck(&client, packet_seq - PACKAGES_PER_SECOND))
+        if (SendPackage(handle,server_addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
         {
-            logn("Package was lost! %u", (packet_seq - (u32)PACKAGES_PER_SECOND));
-            // TODO:
-            // is this a critical package? - issue 
+            logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());
+            keep_alive = 0;
         }
 
-        if ( (packet_seq % BITARRAY_SIZE) == 0)
-        {
-            i32 current_head = client.head_block;
-            u32 current_seq = client.seq;
-            client.head_block += 1;
-            client.head_block = (client.head_block & (SENT_PACKAGES_BIT_BLOCKS - 1));
-            client.seq += BITARRAY_SIZE;
-
-#if 0
-            // review last 64 packages if handled
-            unsigned long index = 0;
-            size_t flip_ack_bitarray = ~client.sent_seq_bit[current_head];
-            while (_BitScanForward64(&index, flip_ack_bitarray) == 1)
-            {
-                logn("package never ack %i", current_seq - (u32)BITARRAY_SIZE + (u32)index);
-                flip_ack_bitarray = flip_ack_bitarray & (~((size_t)1 << index));
-            }
-#endif
-        }
-
-        //HandleRecv(handle, &remote_seq_number, &remote_ack_bit);
-        int recv_status = -1;
-
-        struct packet packet_data;
-        u32 max_packet_size = sizeof( packet_data );
-
-        sockaddr_in from;
-        socklen_t fromLength = sizeof( from );
-
-        int bytes = recvfrom( handle, 
-                (char *)&packet_data, max_packet_size, 
-                0, 
-                (sockaddr*)&from, &fromLength );
-
-        if ( bytes == SOCKET_ERROR )
-        {
-            if (socket_errno != EWOULDBLOCK)
-            {
-                logn("Error recvfrom(). %s", GetLastSocketErrorMessage());
-            }
-        }
-        else if ( bytes == 0 )
-        {
-            logn("No more data. Closing.");
-            recv_status = 0;
-        }
-        else
-        {
-
-            unsigned int from_address = 
-                ntohl( from.sin_addr.s_addr );
-
-            unsigned int from_port = 
-                ntohs( from.sin_port );
-
-            // process received packet
-#if 0
-            logn("[%i.%i.%i.%i] Message (%i) received %s", 
-                    (from_address >> 24),
-                    (from_address >> 16)  & 0xFF0000,
-                    (from_address >> 8)   & 0xFF00,
-                    (from_address >> 0)   & 0xFF,
-                    packet_data.seq, packet_data.msg); 
-#endif
-            recv_status = fromLength;
-
-            if (IsSeqGreaterThan(remote_seq_number,packet_data.ack))
-            {
-                remote_seq_number = packet_data.ack;
-            }
-
-            u32 delta_pck_ack = client.seq - packet_data.ack - 1;
-            i32 offset_block = delta_pck_ack / BITARRAY_SIZE;
-            i32 offset_block_index = (client.head_block - offset_block) & (SENT_PACKAGES_BIT_BLOCKS - 1);
-            i32 offset_bitarray = (packet_data.ack & (BITARRAY_SIZE - 1));
-            client.sent_seq_bit[offset_block_index] = client.sent_seq_bit[offset_block_index] | ((size_t)1 << offset_bitarray);
-        }
+        //Assert(packet.seq != 34);
 
         // I increase array block asap 
         // there is lag between the last packages so pck 62/63 shows a not received
         // because is already pointing to the next block
-        printBits(sizeof(size_t),&client.sent_seq_bit[client.head_block]);
+        //printf("Sent: %10.10u\t",packet_seq - 1);printBits(sizeof(u32),&packet_seq_bit);
+        //printf("Recv: %10.10u\t",remote_seq);printBits(sizeof(u32),&remote_seq_bit);
 
         // sleep expected time
         delta_time time_frame_elapsed = 
@@ -554,14 +539,6 @@ main()
     }
 
     timeEndPeriod(1);
-
-    struct packet packet;
-    sprintf(packet.msg, "Bye");
-    packet.seq = -1;
-    if (SendPackage(handle,addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
-    {
-        logn("Error sending package %i. %s", packet.seq , GetLastSocketErrorMessage());
-    }
 
     CloseSocket(handle);
 
