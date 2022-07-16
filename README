@@ -1,1 +1,18 @@
-Portable c code
+UDP client/server architecture for game programming.
+Client windows
+Server linux
+
+This is a bare-bones implementation minimal external dependency
+
+Goals:
+
+ * learning udp/ip/sockets/congestion
+ * learning cross-platform implementation
+ * learning sync client/server/frames
+ * implement communication protocol for the game
+ * learning encryption
+ * learning compression
+
+
+Current external libraries:
+ * Murmurhash for client ip hash
