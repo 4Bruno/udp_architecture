@@ -103,6 +103,58 @@ InitializeTerminateSignalHandler()
 #endif
 }
 
+void 
+printBits(size_t const size, void const * const ptr)
+{
+    unsigned char *b = (unsigned char*) ptr;
+    unsigned char byte;
+    int i, j;
+    
+    for (i = size-1; i >= 0; i--) {
+        for (j = 7; j >= 0; j--) {
+            byte = (b[i] >> j) & 1;
+            printf("%u", byte);
+        }
+    }
+    puts("");
+}
+
+u32
+IPToU32(const char * ip_s)
+{
+    u32 ip_addr = 0;
+    u32 lshift = 24;
+    u32 range_ip = 0;
+    u32 inv_max_ip = (~(u32)255);
+    const char * err_msg = "Error parsing ip address. Expected format (nnn.xxx.yyy.zzz). Values between 0-255";
+
+    u32 len = strlen(ip_s);
+    for (char * c = (char *)ip_s; *c != 0; ++c)
+    {
+        u32 range_ip = strtoul(c, &c, 10);
+        //logn("yields: %u after: %s",range_ip,c);
+        //printBits(sizeof(range_ip), &range_ip);
+        //printBits(sizeof(range_ip), &inv_max_ip);
+
+        if ( (range_ip & inv_max_ip) > 0)
+        {
+            logn("%s", err_msg);
+            return 0;
+        }
+
+        if ( *c != '.' && *c != 0)
+        {
+            logn("%s", err_msg);
+            return 0;
+        }
+
+        ip_addr = ip_addr | (range_ip << lshift);
+        lshift -= 8;
+    }
+
+    return ip_addr;
+}
+
 u32
 GetEnvIPAddr()
 {
@@ -139,21 +191,6 @@ GetEnvIPAddr()
     return ip_addr;
 }
 
-void 
-printBits(size_t const size, void const * const ptr)
-{
-    unsigned char *b = (unsigned char*) ptr;
-    unsigned char byte;
-    int i, j;
-    
-    for (i = size-1; i >= 0; i--) {
-        for (j = 7; j >= 0; j--) {
-            byte = (b[i] >> j) & 1;
-            printf("%u", byte);
-        }
-    }
-    puts("");
-}
 
 void
 CreatePackages(struct queue_message * queue, i32 packet_type, void * data, u32 size)
@@ -199,14 +236,14 @@ main(int argc, char * argv[])
     socket_handle handle = 0;
     int port = 30000;
 
+#if 1
+    u32 ip_addr = GetEnvIPAddr();
+
     if (argc > 1)
     {
-        char * arg_port = argv[1];
-        port = atoi(arg_port);
+        ip_addr = IPToU32(argv[1]);
     }
 
-#if 1
-    u32 ip_addr = IP_ADDR( 127, 0 , 0 , 1);
 #else
     if (_putenv_s("aws_ip","3.70.5.224") != 0)
     {

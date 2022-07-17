@@ -12,6 +12,8 @@ Goals:
  * implement communication protocol for the game
  * learning encryption
  * learning compression
+ * learning how to debug programs over network
+ * aws server
 
 
 Current external libraries:
