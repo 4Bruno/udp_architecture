@@ -10,6 +10,7 @@
 
 // IO
 #define OpenFile(fd, file, mode) fopen_s(&fd, file, mode)
+#include <direct.h>
 #define mkdir(d) _mkdir(d)
 
 /* ---------------- LINUX ---------------- */
