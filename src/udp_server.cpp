@@ -434,7 +434,7 @@ main()
     }
 
     real_time clock_freq = GetClockResolution();
-    _mkdir(".\\clients\\");
+    mkdir(".\\clients\\");
 
     server->seed = 12312312;
     srand(server->seed);

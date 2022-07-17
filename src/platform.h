@@ -1,5 +1,6 @@
 #ifndef PORTABLE_PLATFORM_H
 
+/* ---------------- WINDOWS ---------------- */
 #ifdef _WIN32
 #include <windows.h>
 #define real_time LARGE_INTEGER
@@ -7,15 +8,24 @@
 #define delta_time LONGLONG
 #define API _declspec( dllexport )
 
+// IO
 #define OpenFile(fd, file, mode) fopen_s(&fd, file, mode)
+#define mkdir(d) _mkdir(d)
 
+/* ---------------- LINUX ---------------- */
 #elif defined __linux__
 #include <time.h>
 #define real_time timespec 
 #define clock_resolution timespec
 #define delta_time r32
 #define API __attribute__((visibility("default")))
+
+// IO
 #define OpenFile(fd, file, mode) fd = fopen(file, mode)
+#include <sys/stat.h>
+// TODO: this is unsafe for server!!!!! full access folder
+#define mkdir(d) mkdir(d, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH)
+    
 
 #else
 #error Unhandled OS
