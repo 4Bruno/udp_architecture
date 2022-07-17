@@ -24,7 +24,8 @@ delta_time
 GetTimeDiff(real_time TimeEnd,real_time TimeStart,real_time ClockFreq)
 {
   delta_time dt = 
-    (TimeEnd.tv_sec - TimeStart.tv_sec) + 
+    (TimeEnd.tv_sec - TimeStart.tv_sec) * 1000.0 
+    + 
     (
       (TimeEnd.tv_nsec - TimeStart.tv_nsec) / 
       1000000.0

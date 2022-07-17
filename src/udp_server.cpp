@@ -533,9 +533,9 @@ main()
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
 
-                i32 lost_on_purpose = (rand() % 10) == 0;
+                i32 lost_on_purpose = (rand() % 50) == 0;
 
-                //if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
+                if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
 
                 if (!lost_on_purpose)
                 {
@@ -678,7 +678,7 @@ main()
 
             delta_time dt_time = GetTimeDiff(GetRealTime(),client->last_update,clock_freq);
 
-            //logn("Time since client send msg %lli", dt_time);
+            //logn("Time since client send msg %f", dt_time);
 
             if (dt_time > 5000)
             {

@@ -40,6 +40,7 @@
 #define WSAECONNRESET ECONNRESET
 #include <unistd.h>
 #define Sleep(n) msleep(n)
+#define sleep(n) msleep(n)
     
 
 #else
