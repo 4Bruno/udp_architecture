@@ -165,11 +165,11 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
         *ptr_client = client;
 
         logn("New client [%i.%i.%i.%i|%i]",
-                            (addr >> 24),
-                            (addr >> 16)  & 0xFF0000,
-                            (addr >> 8)   & 0xFF00,
-                            (addr >> 0)   & 0xFF,
-                            port);
+                (addr >> 24),
+                (addr >> 16)  & 0xFF,
+                (addr >> 8)   & 0xFF,
+                (addr >> 0)   & 0xFF,
+                port);
     }
 
     return client;
@@ -191,11 +191,11 @@ RemoveClient(u32 addr, u32 port, struct hash_map * client_map)
     (*parent) = (*parent)->next;
 
     logn("Removing client [%i.%i.%i.%i|%i]",
-                        (addr >> 24),
-                        (addr >> 16)  & 0xFF0000,
-                        (addr >> 8)   & 0xFF00,
-                        (addr >> 0)   & 0xFF,
-                        port);
+            (addr >> 24),
+            (addr >> 16)  & 0xFF,
+            (addr >> 8)   & 0xFF,
+            (addr >> 0)   & 0xFF,
+            port);
 
     child->addr = 0;
     child->port = 0;
@@ -365,7 +365,7 @@ IsSeqGreaterThan(u16 a, u16 b)
 }
 
 void
-CreatePackages(struct queue_message * queue, i32 packet_type, void * data, u32 size)
+CreatePackages(struct queue_message * queue, i32 packet_type, const void * data, u32 size)
 {
     i32 order = 0;
     i32 id = (queue->last_id++ & ((1 << 8) - 1));
@@ -539,15 +539,6 @@ main()
 
                 if (!lost_on_purpose)
                 {
-                    // process received packet
-#if 0
-                    logn("[%i.%i.%i.%i] Message (%u) received %s", 
-                            (from_address >> 24),
-                            (from_address >> 16)  & 0xFF0000,
-                            (from_address >> 8)   & 0xFF00,
-                            (from_address >> 0)   & 0xFF,
-                            recv_datagram.seq, recv_datagram.msg); 
-#endif
                     switch (client->status)
                     {
                         case client_status_in_game:
@@ -576,8 +567,8 @@ main()
 
                                         client->status = client_status_trying_auth;
 
-#pragma GCC diagnostic ignored "-Wcast-qual"
-                                        CreatePackages(&client->queue_msg_to_send, 0, (void *)reply, sizeof(reply));
+//#pragma GCC diagnostic ignored "-Wcast-qual"
+                                        CreatePackages(&client->queue_msg_to_send, 0, (const void *)reply, sizeof(reply));
 
                                         break;
                                     }

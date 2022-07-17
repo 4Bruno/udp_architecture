@@ -163,23 +163,17 @@ GetEnvIPAddr()
     char ip_s[255];
     size_t len = 0;
 
+
     if (getenv_s(&len, &ip_s[0], sizeof(ip_s),"aws_ip") == 0)
     {
         if (len == 0)
         {
+            logn("Missing aws_ip env var, using localhost");
             ip_addr = IP_ADDR( 127, 0 , 0 , 1);
         }
         else
         {
-            char * start_c = (char *)ip_s;
-            u32 shift = 24;
-            u32 range_ip = 0;
-            while ((start_c < (ip_s + len)) && (range_ip = strtoul(start_c, &start_c, 10)))
-            {
-                ip_addr = ip_addr | (range_ip << shift);
-                shift -= 8;
-                start_c += 1; // skip .
-            }
+            ip_addr = IPToU32(ip_s);
         }
     }
     else
@@ -193,7 +187,7 @@ GetEnvIPAddr()
 
 
 void
-CreatePackages(struct queue_message * queue, i32 packet_type, void * data, u32 size)
+CreatePackages(struct queue_message * queue, i32 packet_type, const void * data, u32 size)
 {
     i32 order = 0;
     i32 id = (queue->last_id++ & ((1 << 8) - 1));
@@ -251,6 +245,13 @@ main(int argc, char * argv[])
     }
     u32 ip_addr = GetEnvIPAddr();
 #endif
+
+    logn("Attemp connection to client [%i.%i.%i.%i|%i]",
+            (ip_addr >> 24),
+            (ip_addr >> 16)  & 0xFF,
+            (ip_addr >> 8)   & 0xFF,
+            (ip_addr >> 0)   & 0xFF,
+            port);
 
     // server port
     sockaddr_in server_addr = CreateSocketAddress( ip_addr, port);
@@ -311,8 +312,6 @@ main(int argc, char * argv[])
 
 
         {
-            int recv_status = -1;
-
             struct packet recv_datagram;
             u32 max_packet_size = sizeof( struct packet);
 
@@ -334,7 +333,6 @@ main(int argc, char * argv[])
             else if ( bytes == 0 )
             {
                 logn("No more data. Closing.");
-                recv_status = 0;
             }
             else
             {
@@ -365,15 +363,7 @@ main(int argc, char * argv[])
                     *msg = (struct message *)recv_datagram.data + begin_data_offset;
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
-#if 0
-                logn("[%i.%i.%i.%i] Message (%i) received %s", 
-                        (from_address >> 24),
-                        (from_address >> 16)  & 0xFF0000,
-                        (from_address >> 8)   & 0xFF00,
-                        (from_address >> 0)   & 0xFF,
-                        recv_datagram.seq, recv_datagram.msg); 
-#endif
-                recv_status = fromLength;
+
                 {
 
                     /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
@@ -474,7 +464,7 @@ main(int argc, char * argv[])
 
                 my_status_with_server = client_status_trying_auth;
 
-                CreatePackages(&queue_msg_to_send, package_type_auth, (void *)&login_data, sizeof(udp_auth));
+                CreatePackages(&queue_msg_to_send, package_type_auth, (const void *)&login_data, sizeof(udp_auth));
 
             } break;
             default:
