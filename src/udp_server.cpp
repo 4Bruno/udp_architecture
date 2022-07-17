@@ -355,7 +355,7 @@ IsSeqGreaterThan(u32 a, u32 b)
 inline i32
 IsSeqGreaterThan(u16 a, u16 b)
 {
-    const u32 half = USHRT_MAX / 2;
+    const u16 half = USHRT_MAX / 2;
 
     i32 result = 
         ((a > b) && ((a - b) <= half)) ||
@@ -398,7 +398,7 @@ CreatePackages(struct queue_message * queue, i32 packet_type, void * data, u32 s
 void 
 printBits(size_t const size, void const * const ptr)
 {
-    unsigned char *b = (unsigned char*) ptr;
+    const unsigned char *b = (const unsigned char*) ptr;
     unsigned char byte;
     int i, j;
     
@@ -442,16 +442,13 @@ main()
 
     u32 packages_per_second = 10;
     r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
-    real_time perf_freq = GetClockResolution();
 
     real_time time_last_msg_to_client;
 
     while ( server->keep_alive )
     {
-        real_time starting_time, ending_time, delta_ms;
+        real_time starting_time;
         starting_time = GetRealTime();
-
-        i32 any_pkc_sent = 0;
 
         for (int entry_index = 0;
                  entry_index < server->client_map.entries_count;
@@ -523,13 +520,13 @@ main()
                 Assert( (client->server_packet_seq == recv_packet_ack) || IsSeqGreaterThan(client->server_packet_seq, recv_packet_ack));
 
                 struct message * messages[8];
-                u32 msg_count = recv_datagram.header.messages;
+                i32 msg_count = recv_datagram.header.messages;
                 // datagram with 492b max payload can have at most
                 // 7.6 messages given that each msg has 32b header + 32b data
                 Assert(recv_datagram.header.messages <= sizeof(messages));
 
                 u32 begin_data_offset = 0;
-                for (int msg_index = 0;
+                for (i32 msg_index = 0;
                         msg_index < msg_count;
                         ++msg_index)
                 {
@@ -581,6 +578,7 @@ main()
 
                                         client->status = client_status_trying_auth;
 
+#pragma GCC diagnostic ignored "-Wcast-qual"
                                         CreatePackages(&client->queue_msg_to_send, 0, (void *)reply, sizeof(reply));
 
                                         break;
@@ -607,7 +605,6 @@ main()
                     i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - client->client_remote_seq));
                     Assert(delta_local_remote_seq < 32);
 
-                    u32 sync_remote_seq_bit = client->client_remote_seq_bit;
                     u32 bit_mask = 0;
                     u32 remote_bit_index = (recv_packet_seq & 31);
 
@@ -718,7 +715,7 @@ main()
 
                 u32 current_size = 0;
                 queue_message * queue = &client->queue_msg_to_send;
-                for (int i = queue->begin; 
+                for (u32 i = queue->begin; 
                         i != queue->next; 
                         i = (++i & (ArrayCount(queue->messages) - 1)))
                 {

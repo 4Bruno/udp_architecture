@@ -53,6 +53,7 @@
 #define Assert(a) if ( (a) == 0 )\
                   {\
                      int x = *(volatile int *)0;\
+                     if (x == 3) { x = 2; };\
                   }
 
 #define ArrayCount(a) ((sizeof(a)) / (sizeof(a[0])))
