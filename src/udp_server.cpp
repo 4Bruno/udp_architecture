@@ -4,6 +4,7 @@
 #include "atomic.h"
 #include "MurmurHash3.h"
 #include "protocol.h"
+#include "math.h"
 
 
 static volatile int keep_alive = 1;
@@ -138,7 +139,7 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
         client->status = client_status_none;
         client->last_update = GetRealTime();
         client->addr_ip = CreateSocketAddress( addr , port);
-        client->last_message_from_server.QuadPart = 0;
+        ZeroTime(client->last_message_from_server);
 #if 1
         client->server_packet_seq = UINT_MAX;
         client->server_packet_seq_bit = ~0;
