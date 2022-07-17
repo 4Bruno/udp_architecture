@@ -1,11 +1,9 @@
-
 #include "network_udp.h"
 #include "logger.h"
 #include <string.h>
 #include "atomic.h"
 #include "MurmurHash3.h"
 #include "protocol.h"
-#include <direct.h>
 
 
 static volatile int keep_alive = 1;
@@ -85,7 +83,7 @@ CreateClientLog(struct client * client)
     char addr_to_s[50];
     sprintf(addr_to_s, ".\\clients\\%i_%i", client->addr, client->port);
 
-    fopen_s(&client->fd,addr_to_s, "w+");
+    OpenFile(client->fd,addr_to_s, "w+");
     Assert(client->fd);
 
     log_entry entry;

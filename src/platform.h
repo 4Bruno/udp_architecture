@@ -7,10 +7,15 @@
 #define delta_time LONGLONG
 #define API _declspec( dllexport )
 
+#define OpenFile(fd, file, mode) fopen_s(&fd, file, mode)
+
 #elif defined __linux__
+#include <time.h>
 #define real_time timespec 
 #define clock_resolution timespec
-#define delta_time LONGLONG
+#define delta_time r32
+#define API __attribute__((visibility("default")))
+#define OpenFile(fd, file, mode) fd = fopen(file, mode)
 
 #else
 #error Unhandled OS
