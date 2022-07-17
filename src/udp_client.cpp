@@ -376,33 +376,6 @@ main(int argc, char * argv[])
                 recv_status = fromLength;
                 {
 
-#if 0
-                    // TODO: what if we lose all packages for 1 > s?
-                    // should we simply reset to 0 all bits and move on
-                    // TEST THIS
-                    i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
-                    Assert(delta_local_remote_seq < 32);
-                    if (delta_local_remote_seq < 32)
-                    {
-                        if (IsSeqGreaterThan(recv_packet_seq,remote_seq))
-                        {
-                            Assert(IsSeqGreaterThan(recv_packet_seq, remote_seq));
-
-                            u32 remote_bit_index = ((remote_seq + 1) & 31);
-                            u32 packet_seq_index = (recv_packet_seq & 31);
-
-                            u32 bit_mask = ~(((u32)~0 << (remote_bit_index + (31 - packet_seq_index))) >> (31 - packet_seq_index));
-                            remote_seq_bit = remote_seq_bit & bit_mask;
-                            remote_seq_bit = remote_seq_bit | (1 << packet_seq_index);
-                        }
-                        else
-                        {
-                            remote_seq_bit = remote_seq_bit | (1 << (recv_packet_seq & 31));
-                        }
-
-                        remote_seq = recv_packet_seq;
-                    }
-#endif
                     /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
                     // unless crafted package, recv package should always be higher than our record
                     Assert(IsSeqGreaterThan(recv_packet_seq,remote_seq));
@@ -427,7 +400,7 @@ main(int argc, char * argv[])
                         u32 hi = max(remote_bit_index, local_bit_index);
                         u32 max_minus_hi = (31 - hi);
 
-                        u32 bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+                        bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
 
                         //     hi        low 
                         //      v         v
