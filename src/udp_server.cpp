@@ -443,8 +443,6 @@ main()
     u32 packages_per_second = 10;
     r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
 
-    real_time time_last_msg_to_client;
-
     while ( server->keep_alive )
     {
         real_time starting_time;

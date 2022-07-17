@@ -39,7 +39,7 @@
 // socket windows diff definitions
 #define WSAECONNRESET ECONNRESET
 #include <unistd.h>
-#define Sleep sleep
+#define Sleep(n) msleep(n)
     
 
 #else
@@ -81,6 +81,9 @@ GetClockResolution();
 
 API delta_time
 GetTimeDiff(real_time TimeEnd,real_time TimeStart,real_time ClockFreq);
+
+API int 
+msleep(u32 msec);
 
 #define Kilobytes(x) 1024 * x
 #define Megabytes(x) 1024 * Kilobytes(x)
