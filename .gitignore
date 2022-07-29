@@ -2,3 +2,6 @@ build/
 *.vim
 *temp*
 *.py
+
+client.bat
+server.bat

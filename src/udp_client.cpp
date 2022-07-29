@@ -19,6 +19,7 @@
 #include <string.h>
 #include "atomic.h"
 #include "protocol.h"
+#include "console_sequences.cpp"
 
 #pragma comment( lib, "Winmm.lib" )
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
@@ -108,7 +109,7 @@ printBits(size_t const size, void const * const ptr)
 {
     unsigned char *b = (unsigned char*) ptr;
     unsigned char byte;
-    int i, j;
+    size_t i, j;
     
     for (i = size-1; i >= 0; i--) {
         for (j = 7; j >= 0; j--) {
@@ -128,7 +129,7 @@ IPToU32(const char * ip_s)
     u32 inv_max_ip = (~(u32)255);
     const char * err_msg = "Error parsing ip address. Expected format (nnn.xxx.yyy.zzz). Values between 0-255";
 
-    u32 len = strlen(ip_s);
+    u32 len = (u32)strlen(ip_s);
     for (char * c = (char *)ip_s; *c != 0; ++c)
     {
         u32 range_ip = strtoul(c, &c, 10);
@@ -217,10 +218,99 @@ CreatePackages(struct queue_message * queue, i32 packet_type, const void * data,
     }
 }
 
+coord
+Win32GetConsoleSize(struct console * con)
+{
+    CONSOLE_SCREEN_BUFFER_INFO ScreenBufferInfo;
+    GetConsoleScreenBufferInfo(con->handle_out, &ScreenBufferInfo);
+
+    coord Size;
+    Size.X = ScreenBufferInfo.srWindow.Right - ScreenBufferInfo.srWindow.Left + 1;
+    Size.Y = ScreenBufferInfo.srWindow.Bottom - ScreenBufferInfo.srWindow.Top + 1;
+
+    return Size;
+}
+
+struct console
+Win32CreateVTConsole()
+{
+    struct console con;
+    con.vt_enabled= false;
+    con.margin_bottom = 0;
+    con.margin_top = 0;
+    con.count_max_palette_index = 0;
+    con.handle_out = INVALID_HANDLE_VALUE;
+
+    // Set output mode to handle virtual terminal sequences
+    con.handle_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    con.handle_in = GetStdHandle(STD_INPUT_HANDLE);
+
+    if (con.handle_out != INVALID_HANDLE_VALUE &&
+            con.handle_in != INVALID_HANDLE_VALUE)
+    {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(con.handle_out, &dwMode))
+        {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            if (SetConsoleMode(con.handle_out, dwMode))
+            {
+                con.vt_enabled = true;
+            }
+        }
+#if 0
+        if (GetConsoleMode(con.handle_in, &dwMode))
+        {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+            if (SetConsoleMode(con.handle_in, dwMode))
+            {
+                con.vt_enabled = con.vt_enabled & true;
+            }
+        }
+#endif
+    }
+
+    if (con.vt_enabled)
+    {
+        con.size = Win32GetConsoleSize(&con);
+    }
+
+    return con;
+}
+
+struct console con;
+
+void
+ConsoleClientStatus(const char * s)
+{
+    const char * msg = "connection status: ";
+    const int max_len = 40;
+    const int max_len_status = 12;
+    const int remaining_space = max_len - 19 /* size msg */;
+    int start_col = con.size.X - max_len;
+    MoveCursorAbs(1, start_col);
+
+    coord p = ConsoleGetCursorP();
+    printf("%s%*.*s",msg,remaining_space,remaining_space,s);
+}
+
 int
 main(int argc, char * argv[])
 {
     InitializeTerminateSignalHandler();
+
+    con = Win32CreateVTConsole();
+    
+    if (!con.vt_enabled)
+    {
+        logn("Couldn't initialize console virtual seq");
+        return - 1;
+    }
+
+    ConsoleAlternateBuffer();
+    ConsoleClear();
+    SetScrollMargin(&con, 3, 2);
+    MoveCursorAbs(1,1);
+    ConsoleSetTextFormat(2, Bright_Background_Green, Foreground_Black);
 
     if (!InitializeSockets())
     {
@@ -246,12 +336,24 @@ main(int argc, char * argv[])
     u32 ip_addr = GetEnvIPAddr();
 #endif
 
+    int start_col = con.size.X - 40;
+    int max_len = 40 - 11;
+    MoveCursorAbs(2, start_col);
+    printf("Server IP: [%3i.%3i.%3i.%3i|%5.5i]",
+            (ip_addr >> 24),
+            (ip_addr >> 16)  & 0xFF,
+            (ip_addr >> 8)   & 0xFF,
+            (ip_addr >> 0)   & 0xFF,
+            port);
+
     logn("Attemp connection to client [%i.%i.%i.%i|%i]",
             (ip_addr >> 24),
             (ip_addr >> 16)  & 0xFF,
             (ip_addr >> 8)   & 0xFF,
             (ip_addr >> 0)   & 0xFF,
             port);
+
+    ConsoleClientStatus("Disconnected");
 
     // server port
     sockaddr_in server_addr = CreateSocketAddress( ip_addr, port);
@@ -267,15 +369,19 @@ main(int argc, char * argv[])
     u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
     u32 remote_seq = UINT_MAX;
     u32 remote_seq_bit = ~0;
+    real_time packet_seq_realtime[32];
+    delta_time packet_seq_deltatime[32];
+    for (i32 i = 0; i < ArrayCount(packet_seq_realtime); ++i)
+    {
+        ZeroTime(packet_seq_realtime[i]);
+        packet_seq_deltatime[i] = 0.0f;
+    }
 #else
     u32 packet_seq = UINT_MAX - 640;
     u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
     u32 remote_seq = UINT_MAX - 350;
     u32 remote_seq_bit = ~0;
 #endif
-
-    package_queue packages_received_ring = {};
-    packages_received_ring.head = 0;
 
     real_time perf_freq = GetClockResolution();
 
@@ -294,7 +400,7 @@ main(int argc, char * argv[])
 
     while ( keep_alive )
     {
-        real_time starting_time, ending_time, delta_ms;
+        real_time starting_time;
 
         starting_time = GetRealTime();
 
@@ -336,6 +442,9 @@ main(int argc, char * argv[])
             }
             else
             {
+
+                ConsoleClientStatus("Connected");
+
                 unsigned int from_address = 
                     ntohl( from.sin_addr.s_addr );
 
@@ -349,13 +458,13 @@ main(int argc, char * argv[])
                 Assert( (packet_seq == recv_packet_ack) || IsSeqGreaterThan(packet_seq, recv_packet_ack));
 
                 struct message * messages[8];
-                u32 msg_count = recv_datagram.header.messages;
+                i32 msg_count = recv_datagram.header.messages;
                 // datagram with 492b max payload can have at most
                 // 7.6 messages given that each msg has 32b header + 32b data
                 Assert(recv_datagram.header.messages <= sizeof(messages));
 
                 u32 begin_data_offset = 0;
-                for (int msg_index = 0;
+                for (i32 msg_index = 0;
                         msg_index < msg_count;
                         ++msg_index)
                 {
@@ -439,6 +548,7 @@ main(int argc, char * argv[])
                     }
 
                     bit_mask = bit_mask ^ ((u32)1 << lo);
+                    packet_seq_deltatime[remote_bit_index] = GetTimeDiff(GetRealTime(), packet_seq_realtime[remote_bit_index], perf_freq);
                 }
 
                 packet_seq_bit = (recv_packet_ack_bit & bit_mask);
@@ -459,8 +569,8 @@ main(int argc, char * argv[])
             case client_status_none:
             {
                 struct udp_auth login_data;
-                sprintf(login_data.user,"%s","anonymous");
-                sprintf(login_data.pwd,"%s","1234");
+                sprintf_s(login_data.user,"%s","anonymous");
+                sprintf_s(login_data.pwd,"%s","1234");
 
                 my_status_with_server = client_status_trying_auth;
 
@@ -472,10 +582,23 @@ main(int argc, char * argv[])
             } break;
         }
 
+        r32 aggr_roundtrips = 0.0f;
+        i32 count_pkgs_received = 0;
+        for (i32 i = 0; i < ArrayCount(packet_seq_deltatime); ++i)
+        {
+            u32 mask = ((u32)1 << i);
+            if ( (packet_seq_bit & mask) ==  mask )
+            {
+                aggr_roundtrips += packet_seq_deltatime[i];
+                count_pkgs_received += 1;
+            }
+        }
+        r32 avg_roundtrips = aggr_roundtrips / (r32)(max(count_pkgs_received, 1));
 
         // set current seq as not received
         packet_seq += 1;
-        packet_seq_bit = (packet_seq_bit & ~(1 << (packet_seq & 31)));
+        u32 package_bit_index = (packet_seq & 31);
+        packet_seq_bit = (packet_seq_bit & ~((u32)1 << package_bit_index));
 
         struct packet packet;
         packet.header.seq       = packet_seq;
@@ -503,6 +626,7 @@ main(int argc, char * argv[])
             }
         }
 
+        packet_seq_realtime[package_bit_index] = GetRealTime();
         if (SendPackage(handle,server_addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
         {
             logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());
@@ -510,12 +634,6 @@ main(int argc, char * argv[])
         }
 
         //Assert(packet.seq != 34);
-
-        // I increase array block asap 
-        // there is lag between the last packages so pck 62/63 shows a not received
-        // because is already pointing to the next block
-        //printf("Sent: %10.10u\t",packet_seq - 1);printBits(sizeof(u32),&packet_seq_bit);
-        //printf("Recv: %10.10u\t",remote_seq);printBits(sizeof(u32),&remote_seq_bit);
 
         // sleep expected time
         delta_time time_frame_elapsed = 
@@ -535,6 +653,12 @@ main(int argc, char * argv[])
                 remaining_ms = expected_ms_per_package - time_frame_elapsed;
             }
         }
+
+    }
+
+    if (con.vt_enabled)
+    {
+        ConsoleExitAlternateBuffer();
     }
 
     timeEndPeriod(1);
