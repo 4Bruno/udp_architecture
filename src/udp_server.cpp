@@ -6,6 +6,7 @@
 #include "protocol.h"
 #include "math.h"
 
+#define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
 
 static volatile int keep_alive = 1;
 
@@ -140,6 +141,7 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
         client->last_update = GetRealTime();
         client->addr_ip = CreateSocketAddress( addr , port);
         ZeroTime(client->last_message_from_server);
+        client->last_message_from_server = GetRealTime();
 #if 1
         client->server_packet_seq = UINT_MAX;
         client->server_packet_seq_bit = ~0;
@@ -400,7 +402,7 @@ printBits(size_t const size, void const * const ptr)
 {
     const unsigned char *b = (const unsigned char*) ptr;
     unsigned char byte;
-    int i, j;
+    size_t i, j;
     
     for (i = size-1; i >= 0; i--) {
         for (j = 7; j >= 0; j--) {
@@ -533,7 +535,7 @@ main()
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
 
-                i32 lost_on_purpose = (rand() % 50) == 0;
+                i32 lost_on_purpose = (rand() % 20) == 0;
 
                 if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
 
@@ -686,6 +688,8 @@ main()
                 RemoveClient(client, &server->client_map);
                 entry_index -= 1;
             }
+
+            //logn("Diff client last msg (%f - %f) = %f",QUAD_TO_MS(GetRealTime()),QUAD_TO_MS(client->last_message_from_server),GetTimeDiff(GetRealTime(), client->last_message_from_server,clock_freq));
 
             if (GetTimeDiff(GetRealTime(), client->last_message_from_server,clock_freq) > expected_ms_per_package)
             {

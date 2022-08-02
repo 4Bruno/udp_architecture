@@ -138,14 +138,6 @@ ConsoleSetNextPalette(console * con, u32 r, u32 g, u32 b)
 }
 
 void
-ConsolePrintstatus(console * con, const char * msg)
-{
-    printf(CSI "%d;1H", con->size.Y);
-    printf(CSI "K"); // clear the line
-    printf("%s", msg);
-}
-
-void
 ConsoleSetForegroundColor(u32 r, u32 g, u32 b)
 {
     printf(CSI "%u;2;%u;%u;%um",
@@ -231,11 +223,26 @@ GetConsoleNumLines(console * con)
 }
 
 void
+ConsoleSaveCursor()
+{
+    printf(CSI "s");
+}
+void
+ConsoleRestoreCursor()
+{
+    printf(CSI "u");
+}
+
+void
 SetScrollMargin(console * con, int margin_top, int margin_bottom)
 {
     con->margin_bottom = margin_bottom;
     con->margin_top = margin_top;
     printf(CSI "%d;%dr",margin_top, con->size.Y - margin_bottom);
+
+    // modify log line output to account for margins
+    con->max_lines = (con->size.Y - margin_top - margin_bottom);
+    con->current_line = (con->current_line % con->max_lines);
 }
 
 void
@@ -243,6 +250,12 @@ SetTabStopAt(int x, int y)
 {
     MoveCursorAbs(x, y);
     printf(ESC "H"); // set a tab stop
+}
+
+void
+ConsoleClearLine(int line)
+{
+    printf(CSI "%iK", line);
 }
 
 void

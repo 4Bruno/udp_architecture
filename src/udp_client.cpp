@@ -40,12 +40,6 @@ struct package_info
     i32 ack;
 };
 
-struct package_queue
-{
-#define PACKAGES_PER_SECOND 32 
-    int head;
-    struct package_info packages[PACKAGES_PER_SECOND];
-};
 
 inline i32
 IsSeqGreaterThan(u32 a, u32 b)
@@ -272,6 +266,8 @@ Win32CreateVTConsole()
     if (con.vt_enabled)
     {
         con.size = Win32GetConsoleSize(&con);
+        con.current_line = 0;
+        con.max_lines = con.size.Y;
     }
 
     return con;
@@ -280,17 +276,83 @@ Win32CreateVTConsole()
 struct console con;
 
 void
+ConsoleAddMessage(const char * format, ...)
+{
+    if (con.current_line > con.max_lines)
+    {
+        con.current_line = con.max_lines;
+        printf(CSI "1S");
+    }
+
+    va_list list;
+    va_start(list, format);
+
+    int output_after_top_margin = con.current_line + con.margin_top;
+
+    ConsoleClearLine(output_after_top_margin);
+    MoveCursorAbs(output_after_top_margin, 1);
+    vprintf(format, list);
+
+    va_end(list);
+
+    con.current_line = ++con.current_line;
+}
+
+void
+ConsolePrintstatus(const char * format, ...)
+{
+    va_list list;
+    va_start(list, format);
+
+    printf(CSI "%d;1H", con.size.Y);
+    printf(CSI "K"); // clear the line
+    
+    vprintf(format, list);
+
+    va_end(list);
+
+}
+
+
+void
+ConsoleUpdateMetrics(r32 time_frame_elapsed, r32 avg_package_roundtrip)
+{
+    i32 metrics_line = 3;
+    ConsoleSaveCursor();
+    MoveCursorAbs(metrics_line, 1);
+    ConsoleClearLine(metrics_line);
+    printf("fps: %3.1f, roundtrip: %3.1f",time_frame_elapsed,avg_package_roundtrip);
+    ConsoleRestoreCursor();
+}
+
+void
 ConsoleClientStatus(const char * s)
 {
     const char * msg = "connection status: ";
-    const int max_len = 40;
-    const int max_len_status = 12;
+    const int max_len = con.size.X;
     const int remaining_space = max_len - 19 /* size msg */;
-    int start_col = con.size.X - max_len;
+    int start_col = 1;
+    ConsoleSaveCursor();
     MoveCursorAbs(1, start_col);
-
-    coord p = ConsoleGetCursorP();
+    ConsoleClearLine(1);
     printf("%s%*.*s",msg,remaining_space,remaining_space,s);
+    ConsoleRestoreCursor();
+}
+
+struct format_ip
+{
+    char ip[12 + 3 + 5 + 3 + 1];
+};
+
+format_ip
+FormatIP(u32 addr, u32 port)
+{ 
+    struct format_ip format_ip;
+    sprintf_s(format_ip.ip, "[%3i.%3i.%3i.%3i|%5.5i]", 
+            (addr >> 24), (addr >> 16)  & 0xFF, (addr >> 8)   & 0xFF, (addr >> 0)   & 0xFF,
+            port);
+
+    return format_ip;
 }
 
 int
@@ -310,7 +372,7 @@ main(int argc, char * argv[])
     ConsoleClear();
     SetScrollMargin(&con, 3, 2);
     MoveCursorAbs(1,1);
-    ConsoleSetTextFormat(2, Bright_Background_Green, Foreground_Black);
+    ConsoleSetTextFormat(2, Background_Black, Foreground_Green);
 
     if (!InitializeSockets())
     {
@@ -336,22 +398,19 @@ main(int argc, char * argv[])
     u32 ip_addr = GetEnvIPAddr();
 #endif
 
-    int start_col = con.size.X - 40;
-    int max_len = 40 - 11;
+    int start_col = 1;
+    int max_len = con.size.X - 11;
     MoveCursorAbs(2, start_col);
-    printf("Server IP: [%3i.%3i.%3i.%3i|%5.5i]",
-            (ip_addr >> 24),
-            (ip_addr >> 16)  & 0xFF,
-            (ip_addr >> 8)   & 0xFF,
-            (ip_addr >> 0)   & 0xFF,
-            port);
+    printf("%s %*.*s", "Server IP:", max_len ,max_len, FormatIP(ip_addr, port).ip);
 
+#if 0
     logn("Attemp connection to client [%i.%i.%i.%i|%i]",
             (ip_addr >> 24),
             (ip_addr >> 16)  & 0xFF,
             (ip_addr >> 8)   & 0xFF,
             (ip_addr >> 0)   & 0xFF,
             port);
+#endif
 
     ConsoleClientStatus("Disconnected");
 
@@ -385,13 +444,15 @@ main(int argc, char * argv[])
 
     real_time perf_freq = GetClockResolution();
 
+#define PACKAGES_PER_SECOND 32
+
     u32 packages_per_second = PACKAGES_PER_SECOND;
     r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
     // http://www.geisswerks.com/ryan/FAQS/timing.html
     // Sleep will do granular scheduling up to 1ms
     timeBeginPeriod(1);
 
-    logn("Start sending msg to server (rate speed %i packages per second)",PACKAGES_PER_SECOND);
+    ConsolePrintstatus("Start sending msg to server (rate speed %i packages per second)",PACKAGES_PER_SECOND);
 
     client_status my_status_with_server = client_status_none;
 
@@ -411,7 +472,7 @@ main(int argc, char * argv[])
 
         if (!is_packet_ack)
         {
-            logn("Package was lost! %u", (packet_seq - 31));
+            ConsoleAddMessage("Package was lost! %u", (packet_seq - 31));
             // TODO:
             // is this a critical package? - issue 
         }
@@ -633,14 +694,10 @@ main(int argc, char * argv[])
             keep_alive = 0;
         }
 
-        //Assert(packet.seq != 34);
-
         // sleep expected time
         delta_time time_frame_elapsed = 
             GetTimeDiff(GetRealTime(), starting_time, perf_freq);
         r32 remaining_ms = expected_ms_per_package - time_frame_elapsed;
-
-        //logn("Time frame remaining %f\n",remaining_ms);
 
         if (remaining_ms > 1.0f)
         {
@@ -653,7 +710,7 @@ main(int argc, char * argv[])
                 remaining_ms = expected_ms_per_package - time_frame_elapsed;
             }
         }
-
+        ConsoleUpdateMetrics(time_frame_elapsed,avg_roundtrips);
     }
 
     if (con.vt_enabled)

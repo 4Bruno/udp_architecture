@@ -21,6 +21,9 @@ struct console
     int margin_top, margin_bottom;
     int count_max_palette_index;
     coord size;
+
+    int current_line;
+    int max_lines;
 };
 
 struct pos

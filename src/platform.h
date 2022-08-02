@@ -2,13 +2,14 @@
 
 /* ---------------- WINDOWS ---------------- */
 #ifdef _WIN32
+#define OS_WINDOWS
 #include <windows.h>
 #define API _declspec( dllexport )
 
 // Time
 #define real_time LARGE_INTEGER
 #define clock_resolution LARGE_INTEGER
-#define delta_time LONGLONG
+#define delta_time r32 
 #define ZeroTime(rt) rt.QuadPart = 0
 
 
@@ -19,6 +20,7 @@
 
 /* ---------------- LINUX ---------------- */
 #elif defined __linux__
+#define OS_LINUX
 #include <stdlib.h>
 #define API __attribute__((visibility("default")))
 #define TRUE 1
