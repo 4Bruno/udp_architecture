@@ -126,10 +126,7 @@ IPToU32(const char * ip_s)
     u32 len = (u32)strlen(ip_s);
     for (char * c = (char *)ip_s; *c != 0; ++c)
     {
-        u32 range_ip = strtoul(c, &c, 10);
-        //logn("yields: %u after: %s",range_ip,c);
-        //printBits(sizeof(range_ip), &range_ip);
-        //printBits(sizeof(range_ip), &inv_max_ip);
+        u32 range_ip = strtoul(c, &c, 10); // will move to next '.' or \0
 
         if ( (range_ip & inv_max_ip) > 0)
         {
@@ -145,6 +142,8 @@ IPToU32(const char * ip_s)
 
         ip_addr = ip_addr | (range_ip << lshift);
         lshift -= 8;
+
+        if (*c == 0) break;
     }
 
     return ip_addr;
@@ -180,32 +179,98 @@ GetEnvIPAddr()
     return ip_addr;
 }
 
+i32
+IsCriticalMessage(message * msg)
+{
+    i32 is_critical = 
+        (msg->header.message_type & (1 << 7)) == (1 << 7);
+
+    return is_critical;
+}
+
+b32
+IsAckMessage(const u32 * packet_seq_bit, queue_message * queue, i32 index)
+{
+    i32 pck_bit_index = queue->msg_sent_in_package_bit_index[index];
+    i32 bit_mask = ((u32)1 << pck_bit_index);
+
+    i32 is_ack_msg = (*packet_seq_bit & bit_mask) == bit_mask;
+
+    return is_ack_msg;
+}
+
+struct message *
+GetNextAvailableMessageInQueue(struct queue_message * queue, const u32 * packet_seq_bit)
+{
+    struct message * msg = 0;
+    b32 MessageIsAck = 0;
+
+    i32 index = (queue->next++ & (ArrayCount(queue->messages) - 1));
+
+    // this may happen if all packages are critical and none is ack
+    Assert(queue->next != queue->begin);
+
+    msg = queue->messages + index;
+    MessageIsAck = IsAckMessage(packet_seq_bit, queue, index);
+
+    if (IsCriticalMessage(msg) && !MessageIsAck)
+    {
+        struct message * first_ack_msg = 0;
+        i32 index = queue->next;
+        do
+        {
+            first_ack_msg = queue->messages + index;
+            if (IsAckMessage(packet_seq_bit, queue, index))
+            {
+                memcpy(first_ack_msg, msg, sizeof(struct message));
+                msg->header.message_type = 0;
+                break;
+            }
+            index = (index + 1) & (ArrayCount(queue->messages) - 1);
+        } while (index != queue->begin);
+
+        Assert(index != queue->begin);
+    }
+
+    Assert(!IsCriticalMessage(msg) || MessageIsAck);
+
+    return msg;
+}
 
 void
-CreatePackages(struct queue_message * queue, i32 packet_type, const void * data, u32 size)
+CreatePackages(const u32 * packet_seq_bit, struct queue_message * queue, enum package_type packet_type, const void * data, u32 size, b32 is_critical)
 {
     i32 order = 0;
     i32 id = (queue->last_id++ & ((1 << 8) - 1));
+    u8 critical_mask = ((u8)(is_critical ? 1 : 0) << 7);
+
+    // create a header package so peer knows needs to create buffer
+    if (size > ArrayCount(queue->messages[0].data))
+    {
+        struct message * msg = GetNextAvailableMessageInQueue(queue, packet_seq_bit);
+        msg->header.id = id;
+        msg->header.order = order;
+        msg->header.message_type = package_type_buffer | critical_mask;
+        msg->header.len = sizeof(struct udp_buffer);
+
+        udp_buffer buffer_msg = { size };
+        memcpy(msg->data, &buffer_msg, sizeof(udp_buffer) );
+
+        order += 1;
+    }
 
     while (size > 0)
     {
         u32 used_size = min(size, sizeof(queue->messages[0].data));
 
-        Assert(
-                ((queue->next + 1) & (ArrayCount(queue->messages) - 1)) !=
-                (queue->begin & (ArrayCount(queue->messages) - 1))
-              );
+        struct message * msg = GetNextAvailableMessageInQueue(queue, packet_seq_bit);
 
+        msg->header.id = id;
+        msg->header.order = order;
+        msg->header.message_type = packet_type | critical_mask;
+        msg->header.len = used_size;
 
-        struct message * pck = 
-            queue->messages + (queue->next++ & (ArrayCount(queue->messages) - 1));
-
-        pck->header.id = id;
-        pck->header.order = order;
-        pck->header.message_type = packet_type;
-        pck->header.len = used_size;
-
-        memcpy(pck->data, data, used_size);
+        memcpy(msg->data, data, used_size);
 
         size -= used_size;
         order += 1;
@@ -355,6 +420,7 @@ FormatIP(u32 addr, u32 port)
     return format_ip;
 }
 
+
 int
 main(int argc, char * argv[])
 {
@@ -370,7 +436,7 @@ main(int argc, char * argv[])
 
     ConsoleAlternateBuffer();
     ConsoleClear();
-    SetScrollMargin(&con, 3, 2);
+    SetScrollMargin(&con, 4, 2);
     MoveCursorAbs(1,1);
     ConsoleSetTextFormat(2, Background_Black, Foreground_Green);
 
@@ -391,7 +457,7 @@ main(int argc, char * argv[])
     }
 
 #else
-    if (_putenv_s("aws_ip","3.70.5.224") != 0)
+    if (_putenv_s("aws_ip","3.71.25.249") != 0)
     {
         logn("Couldn't set env variable for ip addr");
     }
@@ -435,6 +501,7 @@ main(int argc, char * argv[])
         ZeroTime(packet_seq_realtime[i]);
         packet_seq_deltatime[i] = 0.0f;
     }
+    u32 packet_seq_critical = 0;
 #else
     u32 packet_seq = UINT_MAX - 640;
     u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
@@ -467,14 +534,56 @@ main(int argc, char * argv[])
 
         i32 any_pkc_sent = 0;
 
-        u32 bit_to_check = (1 << ((packet_seq + 1) & (32 - 1)));
-        i32 is_packet_ack = (packet_seq_bit & bit_to_check) == bit_to_check;
+        u32 packet_index_to_check = (packet_seq + 1) & (32 - 1);
+        u32 packet_bit_index_to_check = (1 << packet_index_to_check);
+        i32 is_packet_ack = (packet_seq_bit & packet_bit_index_to_check) == packet_bit_index_to_check;
+        i32 is_packet_critical = (packet_seq_critical & packet_bit_index_to_check) == packet_bit_index_to_check;
 
         if (!is_packet_ack)
         {
-            ConsoleAddMessage("Package was lost! %u", (packet_seq - 31));
-            // TODO:
-            // is this a critical package? - issue 
+            ConsoleAddMessage("Package was lost! %u (critical?%b)", (packet_seq - 31), is_packet_critical);
+            if (is_packet_critical)
+            {
+                queue_message * queue = &queue_msg_to_send;
+                struct message * msg = queue->messages + queue->next;
+                b32 is_ack = (queue->msg_sent_in_package_bit_index[queue->next] == packet_index_to_check);
+                if (
+                        is_ack   
+                        &&
+                        IsCriticalMessage(msg)
+                    )
+                {
+                    // re-send
+                    queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
+                }
+
+                int next_index = (queue->next == queue->begin) ? queue->next + 1 : queue->next;
+                next_index &= (ArrayCount(queue->messages) - 1);
+
+                // corner case begin == next
+                for (int i = next_index; 
+                         i != queue->begin; 
+                         i = ( (++i) & (ArrayCount(queue->messages) - 1)))
+                {
+                    struct message * msg = queue->messages + i;
+                    if (
+                            (queue->msg_sent_in_package_bit_index[i] == packet_index_to_check)
+                            &&
+                            IsCriticalMessage(msg)
+                        )
+                    {
+                        // we need to send it again
+                        if (queue->next != i)
+                        {
+                            struct message * next_msg = (queue->messages + queue->next);
+                            memcpy(next_msg,msg, sizeof(struct message));
+                            memset(msg, 0, sizeof(struct message));
+                        }
+                        queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
+                    }
+                }
+
+            }
         }
 
 
@@ -635,7 +744,7 @@ main(int argc, char * argv[])
 
                 my_status_with_server = client_status_trying_auth;
 
-                CreatePackages(&queue_msg_to_send, package_type_auth, (const void *)&login_data, sizeof(udp_auth));
+                CreatePackages(&packet_seq_bit,&queue_msg_to_send, package_type_auth, (const void *)&login_data, sizeof(udp_auth), true);
 
             } break;
             default:
@@ -658,8 +767,8 @@ main(int argc, char * argv[])
 
         // set current seq as not received
         packet_seq += 1;
-        u32 package_bit_index = (packet_seq & 31);
-        packet_seq_bit = (packet_seq_bit & ~((u32)1 << package_bit_index));
+        u32 new_package_bit_index = (packet_seq & 31);
+        packet_seq_bit = (packet_seq_bit & ~((u32)1 << new_package_bit_index));
 
         struct packet packet;
         packet.header.seq       = packet_seq;
@@ -668,26 +777,39 @@ main(int argc, char * argv[])
         packet.header.protocol  = PROTOCOL_ID;
         packet.header.messages  = 0;
 
+        i32 is_critical = 0;
         u32 current_size = 0;
         queue_message * queue = &queue_msg_to_send;
         for (int i = queue->begin; 
                  i != queue->next; 
-                 i = (++i & (ArrayCount(queue->messages) - 1)))
+                 i = ( (++i) & (ArrayCount(queue->messages) - 1)))
         {
             struct message * msg = queue->messages + i;
-            u32 size = msg ->header.len + sizeof(message_header);
-            memcpy(packet.data + current_size, msg, size);
+            u32 msg_size = msg ->header.len + sizeof(message_header);
+            u32 size_after_msg = (current_size + msg_size);
 
-            current_size += size;
-            queue->begin += 1;
-            packet.header.messages += 1;
-            if (current_size >= sizeof(packet.data))
+            if ( size_after_msg <= sizeof(packet.data) )
             {
-                break;
+                memcpy(packet.data + current_size, msg, msg_size);
+
+                is_critical = is_critical | IsCriticalMessage(msg);
+
+                // keep track in which pck was sent
+                queue->msg_sent_in_package_bit_index[i] = new_package_bit_index;
+
+                current_size = size_after_msg;
+                queue->begin = (++queue->begin) & (ArrayCount(queue->messages) - 1);
+                packet.header.messages += 1;
+                if (current_size >= sizeof(packet.data))
+                {
+                    break;
+                }
             }
         }
 
-        packet_seq_realtime[package_bit_index] = GetRealTime();
+        packet_seq_critical = (packet_seq_critical & (~((u32)1 << new_package_bit_index)));
+        packet_seq_critical = packet_seq_critical | ( (is_critical ? 1 : 0) << new_package_bit_index );
+        packet_seq_realtime[new_package_bit_index] = GetRealTime();
         if (SendPackage(handle,server_addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
         {
             logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());

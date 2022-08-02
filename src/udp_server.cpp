@@ -413,6 +413,15 @@ printBits(size_t const size, void const * const ptr)
     puts("");
 }
 
+i32
+IsCriticalMessage(message * msg)
+{
+    i32 is_critical = 
+        (msg->header.message_type & (1 << 7)) == (1 << 7);
+
+    return is_critical;
+}
+
 int
 main()
 {
@@ -525,6 +534,9 @@ main()
                 // 7.6 messages given that each msg has 32b header + 32b data
                 Assert(recv_datagram.header.messages <= sizeof(messages));
 
+                //i32 lost_on_purpose = (rand() % 20) == 0;
+                i32 lost_on_purpose = 0;
+
                 u32 begin_data_offset = 0;
                 for (i32 msg_index = 0;
                         msg_index < msg_count;
@@ -532,10 +544,12 @@ main()
                 {
                     struct message ** msg = messages + msg_index;
                     *msg = (struct message *)recv_datagram.data + begin_data_offset;
+                    if ( IsCriticalMessage(*msg) )
+                    {
+                        lost_on_purpose = 1;
+                    }
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
-
-                i32 lost_on_purpose = (rand() % 20) == 0;
 
                 if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
 

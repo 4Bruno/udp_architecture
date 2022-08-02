@@ -16,7 +16,7 @@ enum client_status
 struct packet_header
 {
     u16 protocol;
-    u16 messages ;
+    u16 messages;
     u32 seq; // you can get down to u16, the seq will circle every ~1.5h
     u32 ack;
     u32 ack_bit;
@@ -44,9 +44,12 @@ struct packet
 struct message_header
 {
     u8 len;
+    // 8 bit is a signal if critical message (must be ack)
     u8 message_type;
     u8 id;
-    u8 order;
+    // 256 (max index) * 96 b/msg * (1 / 1024 * kb/b) = 23 kb
+    // if use 16 bits you can send messages of up to 6 Mb
+    u8 order; 
 };
 
 // the size of message is important
@@ -75,6 +78,7 @@ struct message
 struct queue_message
 {
     message messages[32];
+    i32 msg_sent_in_package_bit_index[32];
     u32 begin;
     u32 next;
     i32 last_id;
@@ -83,7 +87,10 @@ struct queue_message
 
 enum package_type
 {
-    package_type_auth = 1
+    package_type_buffer = 1,
+    package_type_auth = 2
+    // should only go up to 127, we use last bit as signal for
+    // critical type
 };
 
 struct udp_auth
@@ -92,6 +99,11 @@ struct udp_auth
     char pwd[16];
 };
 
+
+struct udp_buffer
+{
+    u32 size;
+};
 
 
 #endif
