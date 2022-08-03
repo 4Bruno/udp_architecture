@@ -5,12 +5,13 @@
 #include "MurmurHash3.h"
 #include "protocol.h"
 #include "math.h"
+#include "console_sequences.cpp"
 
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
 
 static volatile int keep_alive = 1;
 
-struct client
+struct client_info
 {
     u32 addr;
     u32 port;
@@ -18,10 +19,10 @@ struct client
     client_status status;
     real_time last_update;
     real_time last_message_from_server;
-    struct client * next;
+    struct client_info * next;
     FILE * fd;
     u32 fd_entry_count;
-    struct client ** entry;
+    struct client_info ** entry;
 
     u32 server_packet_seq;
     u32 server_packet_seq_bit;
@@ -61,7 +62,7 @@ struct log_entry
 };
 
 void
-AddClientLogEntry(struct client * client,log_entry * entry)
+AddClientLogEntry(struct client_info * client,log_entry * entry)
 {
     client->fd_entry_count += 1;
     entry->update = GetRealTime();
@@ -70,7 +71,7 @@ AddClientLogEntry(struct client * client,log_entry * entry)
 }
 
 void
-ReadLastClientEntry(struct client * client, log_entry * entry)
+ReadLastClientEntry(struct client_info * client, log_entry * entry)
 {
     fseek(client->fd, 0, SEEK_END);
     u32 pos = ftell(client->fd);
@@ -79,7 +80,7 @@ ReadLastClientEntry(struct client * client, log_entry * entry)
 }
 
 void
-CreateClientLog(struct client * client)
+CreateClientLog(struct client_info * client)
 {
 
     char addr_to_s[50];
@@ -94,15 +95,15 @@ CreateClientLog(struct client * client)
 }
 
 
-struct client *
+struct client_info *
 Client(u32 addr, u32 port, struct hash_map * client_map)
 {
-    struct client ** ptr_client = 0;
-    struct client * client = 0;
+    struct client_info ** ptr_client = 0;
+    struct client_info * client = 0;
     Assert(client_map->table_size > 0);
 
     u32 hashkey = ClientHashKey(addr, port, client_map);
-    ptr_client = (struct client **)client_map->table + hashkey;
+    ptr_client = (struct client_info **)client_map->table + hashkey;
     client = *ptr_client;
 
     while ( client )
@@ -119,12 +120,12 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
     {
         if (client_map->bucket_free_ll)
         {
-            client = (struct client *)client_map->bucket_free_ll;
+            client = (struct client_info *)client_map->bucket_free_ll;
             client_map->bucket_free_ll = client->next;
         }
         else
         {
-            client = (struct client *)client_map->bucket_list + client_map->bucket_first_free;
+            client = (struct client_info *)client_map->bucket_list + client_map->bucket_first_free;
             client_map->bucket_first_free += 1;
 
             if (client_map->bucket_first_free >= client_map->bucket_count)
@@ -153,12 +154,12 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
         client->client_remote_seq = UINT_MAX - 650;
         client->client_remote_seq_bit = ~0;
 #endif
-        memset(&client->queue_msg_to_send, 0, sizeof(client->queue_msg_to_send));
+        memset(&(client->queue_msg_to_send), 0, sizeof(client->queue_msg_to_send));
 
         Assert(client_map->entries_begin);
         Assert(client_map->bucket_count >= (client_map->entries_count + 1));
 
-        struct client ** entry_client = ((struct client **)client_map->entries_begin + client_map->entries_count++);
+        struct client_info ** entry_client = ((struct client_info **)client_map->entries_begin + client_map->entries_count++);
         client->entry = entry_client;
         *entry_client = client;
 
@@ -181,9 +182,9 @@ void
 RemoveClient(u32 addr, u32 port, struct hash_map * client_map)
 {
     u32 hashkey = ClientHashKey(addr,port, client_map);
-    struct client ** parent = (struct client **)client_map->table + hashkey;
+    struct client_info ** parent = (struct client_info **)client_map->table + hashkey;
     Assert(parent);
-    struct client * child = *parent;
+    struct client_info * child = *parent;
     while (child->addr != addr || child->port != port)
     {
         parent = &child->next;
@@ -204,12 +205,12 @@ RemoveClient(u32 addr, u32 port, struct hash_map * client_map)
     child->next = 0;
 
     Assert(child->entry);
-    struct client ** entry_to_remove = child->entry;
-    struct client ** last_entry = (struct client **)client_map->entries_begin + client_map->entries_count - 1;
+    struct client_info ** entry_to_remove = child->entry;
+    struct client_info ** last_entry = (struct client_info **)client_map->entries_begin + client_map->entries_count - 1;
 
     if ((*entry_to_remove) != (*last_entry))
     {
-        struct client * last_client  = (*last_entry);
+        struct client_info * last_client  = (*last_entry);
         last_client->entry = entry_to_remove;
         (*entry_to_remove) = last_client;
         *last_entry = 0;
@@ -224,16 +225,16 @@ RemoveClient(u32 addr, u32 port, struct hash_map * client_map)
         fclose(child->fd);
     }
 
-    if ( (struct client *)client_map->bucket_free_ll )
+    if ( (struct client_info *)client_map->bucket_free_ll )
     {
-        child->next = ((struct client *)client_map->bucket_free_ll)->next;
+        child->next = ((struct client_info *)client_map->bucket_free_ll)->next;
     }
 
     client_map->bucket_free_ll = child;
 }
 
 void
-RemoveClient(struct client * client, struct hash_map * client_map)
+RemoveClient(struct client_info * client, struct hash_map * client_map)
 {
     RemoveClient(client->addr, client->port, client_map);
 }
@@ -317,20 +318,20 @@ CreateServer(memory_arena * server_arena, u32 PermanentMemorySize, u32 Transient
 
     // must be power of 2 (x & (256 - 1)) lookup
     server->client_map.table_size = 256;
-    i32 size_table = server->client_map.table_size * sizeof(struct client *);
+    i32 size_table = server->client_map.table_size * sizeof(struct client_info *);
     server->client_map.table = PushSize(&server->permanent_arena, size_table);
     memset(server->client_map.table, 0, size_table);
 
     r32 occupancy_ratio = 0.75f;
     server->client_map.bucket_count = (i32)(occupancy_ratio * (r32)server->client_map.table_size);
-    i32 size_buckets = server->client_map.bucket_count * sizeof(struct client);
+    i32 size_buckets = server->client_map.bucket_count * sizeof(struct client_info);
     server->client_map.bucket_list = PushSize(&server->permanent_arena, size_buckets);
     memset(server->client_map.bucket_list, 0, size_buckets);
 
     server->client_map.bucket_first_free = 0;
 
     // this is an array of pointers to entries in use
-    server->client_map.entries_begin = PushArray(&server->permanent_arena, server->client_map.bucket_count, struct client *);
+    server->client_map.entries_begin = PushArray(&server->permanent_arena, server->client_map.bucket_count, struct client_info *);
     
     return server;
 }
@@ -422,9 +423,90 @@ IsCriticalMessage(message * msg)
     return is_critical;
 }
 
+struct console con;
+
+coord
+Win32GetConsoleSize(struct console * con)
+{
+    CONSOLE_SCREEN_BUFFER_INFO ScreenBufferInfo;
+    GetConsoleScreenBufferInfo(con->handle_out, &ScreenBufferInfo);
+
+    coord Size;
+    Size.X = ScreenBufferInfo.srWindow.Right - ScreenBufferInfo.srWindow.Left + 1;
+    Size.Y = ScreenBufferInfo.srWindow.Bottom - ScreenBufferInfo.srWindow.Top + 1;
+
+    return Size;
+}
+
+struct console
+Win32CreateVTConsole()
+{
+    struct console con;
+    con.vt_enabled= false;
+    con.margin_bottom = 0;
+    con.margin_top = 0;
+    con.count_max_palette_index = 0;
+    con.handle_out = INVALID_HANDLE_VALUE;
+
+    // Set output mode to handle virtual terminal sequences
+    con.handle_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    con.handle_in = GetStdHandle(STD_INPUT_HANDLE);
+
+    if (con.handle_out != INVALID_HANDLE_VALUE &&
+            con.handle_in != INVALID_HANDLE_VALUE)
+    {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(con.handle_out, &dwMode))
+        {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            if (SetConsoleMode(con.handle_out, dwMode))
+            {
+                con.vt_enabled = true;
+            }
+        }
+#if 0
+        if (GetConsoleMode(con.handle_in, &dwMode))
+        {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+            if (SetConsoleMode(con.handle_in, dwMode))
+            {
+                con.vt_enabled = con.vt_enabled & true;
+            }
+        }
+#endif
+    }
+
+    if (con.vt_enabled)
+    {
+        con.size = Win32GetConsoleSize(&con);
+        con.current_line = 0;
+        con.max_lines = con.size.Y;
+    }
+
+    return con;
+}
+
+struct format_ip
+{
+    char ip[12 + 3 + 5 + 3 + 1];
+};
+
+format_ip
+FormatIP(u32 addr, u32 port)
+{ 
+    struct format_ip format_ip;
+    sprintf_s(format_ip.ip, "[%3i.%3i.%3i.%3i|%5.5i]", 
+            (addr >> 24), (addr >> 16)  & 0xFF, (addr >> 8)   & 0xFF, (addr >> 0)   & 0xFF,
+            port);
+
+    return format_ip;
+}
+
 int
 main()
 {
+    con = Win32CreateVTConsole();
+
     if (!InitializeSockets())
     {
         logn("Error initializing sockets library. %s", GetLastSocketErrorMessage());
@@ -463,8 +545,8 @@ main()
                  entry_index < server->client_map.entries_count;
                  ++entry_index)
         {
-            struct client ** client_entry = (struct client **)server->client_map.entries_begin + entry_index;
-            struct client * client = (*client_entry);
+            struct client_info ** client_entry = (struct client_info **)server->client_map.entries_begin + entry_index;
+            struct client_info * client = (*client_entry);
 
             u32 bit_to_check = (1 << ((client->server_packet_seq + 1) & (32 - 1)));
             i32 is_packet_ack = (client->server_packet_seq_bit & bit_to_check) == bit_to_check;
@@ -520,7 +602,7 @@ main()
             }
             else
             {
-                struct client * client = Client(from_address, from_port, &server->client_map);
+                struct client_info * client = Client(from_address, from_port, &server->client_map);
 
                 u32 recv_packet_seq = recv_datagram.header.seq;
                 u32 recv_packet_ack     = recv_datagram.header.ack;
@@ -551,7 +633,10 @@ main()
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
 
-                if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
+                if (lost_on_purpose) 
+                {
+                    //logn("Lost %u on purpose", recv_datagram.header.seq);
+                }
 
                 if (!lost_on_purpose)
                 {
@@ -686,11 +771,25 @@ main()
         }
 
         for (int entry_index = 0;
+                 entry_index < 5; //server->client_map.bucket_count;
+                 ++entry_index /* decrement if client removed */)
+        {
+            struct client_info ** client_entry = (struct client_info **)server->client_map.entries_begin + entry_index;
+            int line = (con.margin_top == 0 ? 1 : con.margin_top) + entry_index;
+            ConsoleClearLine(line);
+            printf("[%i] ptr: %p", entry_index ,*client_entry);
+            if (*client_entry)
+            {
+                printf("; Client %s", FormatIP((*client_entry)->addr, (*client_entry)->port).ip);
+            }
+        }
+
+        for (int entry_index = 0;
                  entry_index < server->client_map.entries_count;
                  ++entry_index /* decrement if client removed */)
         {
-            struct client ** client_entry = (struct client **)server->client_map.entries_begin + entry_index;
-            struct client * client = (*client_entry);
+            struct client_info ** client_entry = (struct client_info **)server->client_map.entries_begin + entry_index;
+            struct client_info * client = (*client_entry);
 
             delta_time dt_time = GetTimeDiff(GetRealTime(),client->last_update,clock_freq);
 

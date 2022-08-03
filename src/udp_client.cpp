@@ -355,10 +355,15 @@ ConsoleAddMessage(const char * format, ...)
     int output_after_top_margin = con.current_line + con.margin_top;
 
     ConsoleClearLine(output_after_top_margin);
-    MoveCursorAbs(output_after_top_margin, 1);
-    vprintf(format, list);
+    //MoveCursorAbs(output_after_top_margin, 1);
+
+    char out[255];
+    vsprintf_s(out, format, list);
 
     va_end(list);
+
+    //vprintf(format, list);
+    printf("%.*s", con.size.X - 1,out);
 
     con.current_line = ++con.current_line;
 }
@@ -369,10 +374,11 @@ ConsolePrintstatus(const char * format, ...)
     va_list list;
     va_start(list, format);
 
-    printf(CSI "%d;1H", con.size.Y);
-    printf(CSI "K"); // clear the line
-    
-    vprintf(format, list);
+    char out[255];
+    vsprintf_s(out, ArrayCount(out), format, list);
+
+    ConsoleClearLine(con.size.Y);
+    printf("%.*s", con.size.X - 1 , out);
 
     va_end(list);
 
@@ -541,7 +547,7 @@ main(int argc, char * argv[])
 
         if (!is_packet_ack)
         {
-            ConsoleAddMessage("Package was lost! %u (critical?%b)", (packet_seq - 31), is_packet_critical);
+            ConsoleAddMessage("Package was lost! %u (critical?%s)", (packet_seq - 31), is_packet_critical ? "True" : "False");
             if (is_packet_critical)
             {
                 queue_message * queue = &queue_msg_to_send;
@@ -603,7 +609,16 @@ main(int argc, char * argv[])
             {
                 if (socket_errno != EWOULDBLOCK)
                 {
-                    logn("Error recvfrom(). %s", GetLastSocketErrorMessage());
+                    coord new_size = Win32GetConsoleSize(&con);
+                    if (new_size.X != con.size.X || new_size.Y != con.size.Y)
+                    {
+                        ConsoleClear();
+                        con.size = new_size;
+                        SetScrollMargin(&con, con.margin_top, con.margin_bottom);
+                    }
+                    ConsolePrintstatus("Error recvfrom(). %s", GetLastSocketErrorMessage());
+                    ConsoleClientStatus("Server error");
+                    keep_alive = false;
                 }
             }
             else if ( bytes == 0 )
