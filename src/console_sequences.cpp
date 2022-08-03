@@ -255,7 +255,12 @@ SetTabStopAt(int x, int y)
 void
 ConsoleClearLine(int line)
 {
-    printf(CSI "%iK", line);
+    MoveCursorAbs(line,1);
+    // 0 - from cursor to end
+    // 1 - from begin to cursor
+    // 2 - entire
+    printf(CSI "2K");
+    //printf(CSI "%iM", line);
 }
 
 void
