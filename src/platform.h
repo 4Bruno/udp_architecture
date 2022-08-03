@@ -106,8 +106,8 @@ inline void *
 PushSize_(memory_arena * arena, i32 size)
 {
     Assert( (arena->size + size) <= arena->max_size );
+    void * base = (u8 *)arena->base + arena->size;
     arena->size += size;
-    void * base = (char *)arena->base + arena->size;
 
     return base;
 }
