@@ -20,6 +20,7 @@
 #include "atomic.h"
 #include "protocol.h"
 #include "console_sequences.cpp"
+#include "math.h"
 
 #pragma comment( lib, "Winmm.lib" )
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
@@ -177,6 +178,14 @@ GetEnvIPAddr()
     }
 
     return ip_addr;
+}
+
+inline package_type
+GetMessageType(message * msg)
+{
+    package_type result = (package_type)((int)msg->header.message_type & ~(1 << 7));
+
+    return result;
 }
 
 i32
@@ -426,7 +435,6 @@ FormatIP(u32 addr, u32 port)
     return format_ip;
 }
 
-
 int
 main(int argc, char * argv[])
 {
@@ -531,6 +539,10 @@ main(int argc, char * argv[])
 
     queue_message queue_msg_to_send;
     memset(&queue_msg_to_send, 0, sizeof(queue_message));
+    for (int i  = 0; i < ArrayCount(queue_msg_to_send.msg_sent_in_package_bit_index); ++i)
+    {
+        queue_msg_to_send.msg_sent_in_package_bit_index[i] = 32;
+    }
 
     while ( keep_alive )
     {
@@ -552,14 +564,17 @@ main(int argc, char * argv[])
             {
                 queue_message * queue = &queue_msg_to_send;
                 struct message * msg = queue->messages + queue->next;
-                b32 is_ack = (queue->msg_sent_in_package_bit_index[queue->next] == packet_index_to_check);
+                i32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
+
+                Assert(BetweenIn(packet_index,0,32));
+
                 if (
-                        is_ack   
+                        (packet_index == packet_index_to_check)
                         &&
                         IsCriticalMessage(msg)
                     )
                 {
-                    // re-send
+                    // msg at next index needs to be re-sent. simply adv pointer
                     queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
                 }
 
@@ -572,13 +587,14 @@ main(int argc, char * argv[])
                          i = ( (++i) & (ArrayCount(queue->messages) - 1)))
                 {
                     struct message * msg = queue->messages + i;
+                    i32 packet_index = queue->msg_sent_in_package_bit_index[i];
                     if (
-                            (queue->msg_sent_in_package_bit_index[i] == packet_index_to_check)
+                            (packet_index == packet_index_to_check)
                             &&
                             IsCriticalMessage(msg)
                         )
                     {
-                        // we need to send it again
+                        // we need to send it again. swap if necessary and incr next
                         if (queue->next != i)
                         {
                             struct message * next_msg = (queue->messages + queue->next);
@@ -648,6 +664,7 @@ main(int argc, char * argv[])
                 // 7.6 messages given that each msg has 32b header + 32b data
                 Assert(recv_datagram.header.messages <= sizeof(messages));
 
+                i32 inc_package_has_any_critical_msg = 0;
                 u32 begin_data_offset = 0;
                 for (i32 msg_index = 0;
                         msg_index < msg_count;
@@ -655,30 +672,81 @@ main(int argc, char * argv[])
                 {
                     struct message ** msg = messages + msg_index;
                     *msg = (struct message *)recv_datagram.data + begin_data_offset;
+                    inc_package_has_any_critical_msg = 
+                        inc_package_has_any_critical_msg || IsCriticalMessage(*msg);
+
+                    // strip critical flag
+                    (*msg)->header.message_type = GetMessageType(*msg);
+
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
 
+#if 0
+                if (inc_package_has_any_critical_msg)
                 {
+                    ConsoleAddMessage("Critical msg from server");
+                }
+#endif
 
-                    /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
-                    // unless crafted package, recv package should always be higher than our record
-                    Assert(IsSeqGreaterThan(recv_packet_seq,remote_seq));
-
-                    // TODO: what if we lose all packages for 1 > s?
-                    // should we simply reset to 0 all bits and move on
-                    // TEST THIS
-                    // int on purpose check abs (to look at no branching method)
-                    // https://graphics.stanford.edu/~seander/bithacks.html#IntegerAbs
-                    i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
-                    Assert(delta_local_remote_seq < 32);
-
-                    u32 sync_remote_seq_bit = remote_seq_bit;
-                    u32 bit_mask = 0;
-                    u32 remote_bit_index = (recv_packet_seq & 31);
-
-                    if (delta_local_remote_seq < 32)
+                // debug lose all critical
+                inc_package_has_any_critical_msg = 0;
+                if (!inc_package_has_any_critical_msg)
+                {
                     {
-                        u32 local_bit_index = (remote_seq & 31);
+                        /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
+                        // unless crafted package, recv package should always be higher than our record
+                        Assert(IsSeqGreaterThan(recv_packet_seq,remote_seq));
+
+                        // TODO: what if we lose all packages for 1 > s?
+                        // should we simply reset to 0 all bits and move on
+                        // TEST THIS
+                        // int on purpose check abs (to look at no branching method)
+                        // https://graphics.stanford.edu/~seander/bithacks.html#IntegerAbs
+                        i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
+                        Assert(delta_local_remote_seq < 32);
+
+                        u32 sync_remote_seq_bit = remote_seq_bit;
+                        u32 bit_mask = 0;
+                        u32 remote_bit_index = (recv_packet_seq & 31);
+
+                        if (delta_local_remote_seq < 32)
+                        {
+                            u32 local_bit_index = (remote_seq & 31);
+
+                            u32 lo = min(remote_bit_index, local_bit_index);
+                            u32 hi = max(remote_bit_index, local_bit_index);
+                            u32 max_minus_hi = (31 - hi);
+
+                            bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+
+                            //     hi        low 
+                            //      v         v
+                            // 00000111111111110000
+                            if (remote_bit_index >= local_bit_index)
+                            {
+                                //     hi        low 
+                                //      v         v
+                                // 11111000000000001111
+                                bit_mask = ~bit_mask; 
+                            }
+
+                            bit_mask = bit_mask ^ ((u32)1 << lo);
+                        }
+
+                        remote_seq_bit = (remote_seq_bit & bit_mask) | ((u32)1 << remote_bit_index);
+                        remote_seq = recv_packet_seq;
+                    }
+
+                    /* UPDATE OUR BIT ARRAY OF PACKAGES SENT CONFIRMED BY PEER */
+
+                    u32 delta_seq_and_ack = (packet_seq - recv_packet_ack);
+                    u32 bit_mask = 0;
+
+                    // TODO: peer is ack packages 1 s old, should we issue a sync flag?
+                    if (delta_seq_and_ack <= 31)
+                    {
+                        u32 remote_bit_index = (recv_packet_ack & 31);
+                        u32 local_bit_index = (packet_seq & 31);
 
                         u32 lo = min(remote_bit_index, local_bit_index);
                         u32 hi = max(remote_bit_index, local_bit_index);
@@ -689,7 +757,7 @@ main(int argc, char * argv[])
                         //     hi        low 
                         //      v         v
                         // 00000111111111110000
-                        if (remote_bit_index >= local_bit_index)
+                        if (local_bit_index >= remote_bit_index)
                         {
                             //     hi        low 
                             //      v         v
@@ -698,45 +766,11 @@ main(int argc, char * argv[])
                         }
 
                         bit_mask = bit_mask ^ ((u32)1 << lo);
+                        packet_seq_deltatime[remote_bit_index] = GetTimeDiff(GetRealTime(), packet_seq_realtime[remote_bit_index], perf_freq);
                     }
 
-                    remote_seq_bit = (remote_seq_bit & bit_mask) | ((u32)1 << remote_bit_index);
-                    remote_seq = recv_packet_seq;
+                    packet_seq_bit = (recv_packet_ack_bit & bit_mask);
                 }
-
-                /* UPDATE OUR BIT ARRAY OF PACKAGES SENT CONFIRMED BY PEER */
-
-                u32 delta_seq_and_ack = (packet_seq - recv_packet_ack);
-                u32 bit_mask = 0;
-
-                // TODO: peer is ack packages 1 s old, should we issue a sync flag?
-                if (delta_seq_and_ack <= 31)
-                {
-                    u32 remote_bit_index = (recv_packet_ack & 31);
-                    u32 local_bit_index = (packet_seq & 31);
-
-                    u32 lo = min(remote_bit_index, local_bit_index);
-                    u32 hi = max(remote_bit_index, local_bit_index);
-                    u32 max_minus_hi = (31 - hi);
-
-                    bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
-
-                    //     hi        low 
-                    //      v         v
-                    // 00000111111111110000
-                    if (local_bit_index >= remote_bit_index)
-                    {
-                        //     hi        low 
-                        //      v         v
-                        // 11111000000000001111
-                        bit_mask = ~bit_mask; 
-                    }
-
-                    bit_mask = bit_mask ^ ((u32)1 << lo);
-                    packet_seq_deltatime[remote_bit_index] = GetTimeDiff(GetRealTime(), packet_seq_realtime[remote_bit_index], perf_freq);
-                }
-
-                packet_seq_bit = (recv_packet_ack_bit & bit_mask);
             }
         }
 

@@ -12,4 +12,21 @@
 #define min(a,b)            (((a) < (b)) ? (a) : (b))
 #endif
 
+inline i32
+BetweenIn(i32 val, i32 min, i32 max)
+{
+    i32 is_between = (val >= min && val <= max);
+
+    return is_between;
+}
+
+inline i32
+BetweenEx(i32 val, i32 min, i32 max)
+{
+    i32 is_between = (val > min && val < max);
+
+    return is_between;
+}
+
+
 #endif

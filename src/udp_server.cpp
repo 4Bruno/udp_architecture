@@ -6,10 +6,11 @@
 #include "protocol.h"
 #include "math.h"
 #include "console_sequences.cpp"
+#include "math.h"
 
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
 
-static volatile int keep_alive = 1;
+static volatile int * keep_alive = 0;
 
 struct client_info
 {
@@ -24,8 +25,12 @@ struct client_info
     u32 fd_entry_count;
     struct client_info ** entry;
 
+    // this are the packages the server sent to client
     u32 server_packet_seq;
     u32 server_packet_seq_bit;
+    u32 server_packet_seq_critical;
+
+    // this monitor client packages received
     u32 client_remote_seq;
     u32 client_remote_seq_bit;
     queue_message queue_msg_to_send;
@@ -84,13 +89,13 @@ CreateClientLog(struct client_info * client)
 {
 
     char addr_to_s[50];
-    sprintf(addr_to_s, ".\\clients\\%i_%i", client->addr, client->port);
+    sprintf_s(addr_to_s, ArrayCount(addr_to_s), ".\\clients\\%i_%i", client->addr, client->port);
 
     OpenFile(client->fd,addr_to_s, "w+");
     Assert(client->fd);
 
     log_entry entry;
-    sprintf((char *)&entry.msg, "New entry\n");
+    sprintf_s((char *)&entry.msg,ArrayCount(entry.msg), "New entry\n");
     AddClientLogEntry(client,&entry);
 }
 
@@ -146,6 +151,9 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
 #if 1
         client->server_packet_seq = UINT_MAX;
         client->server_packet_seq_bit = ~0;
+        // none are critical
+        client->server_packet_seq_critical = 0;
+
         client->client_remote_seq = UINT_MAX;
         client->client_remote_seq_bit = ~0;
 #else
@@ -155,6 +163,11 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
         client->client_remote_seq_bit = ~0;
 #endif
         memset(&(client->queue_msg_to_send), 0, sizeof(client->queue_msg_to_send));
+        // range should fall between 0-31, 32 signal as not set
+        for (int i  = 0; i < ArrayCount(client->queue_msg_to_send.msg_sent_in_package_bit_index); ++i)
+        {
+            client->queue_msg_to_send.msg_sent_in_package_bit_index[i] = 32;
+        }
 
         Assert(client_map->entries_begin);
         Assert(client_map->bucket_count >= (client_map->entries_count + 1));
@@ -367,31 +380,98 @@ IsSeqGreaterThan(u16 a, u16 b)
     return result;
 }
 
+b32
+IsAckMessage(const u32 * packet_seq_bit, queue_message * queue, i32 index)
+{
+    i32 pck_bit_index = queue->msg_sent_in_package_bit_index[index];
+    i32 bit_mask = ((u32)1 << pck_bit_index);
+
+    i32 is_ack_msg = (*packet_seq_bit & bit_mask) == bit_mask;
+
+    return is_ack_msg;
+}
+
+i32
+IsCriticalMessage(message * msg)
+{
+    i32 is_critical = 
+        (msg->header.message_type & (1 << 7)) == (1 << 7);
+
+    return is_critical;
+}
+
+struct message *
+GetNextAvailableMessageInQueue(struct queue_message * queue, const u32 * packet_seq_bit)
+{
+    struct message * msg = 0;
+    b32 MessageIsAck = 0;
+
+    i32 index = (queue->next++ & (ArrayCount(queue->messages) - 1));
+
+    // this may happen if all packages are critical and none is ack
+    Assert(queue->next != queue->begin);
+
+    msg = queue->messages + index;
+    MessageIsAck = IsAckMessage(packet_seq_bit, queue, index);
+
+    if (IsCriticalMessage(msg) && !MessageIsAck)
+    {
+        struct message * first_ack_msg = 0;
+        i32 index = queue->next;
+        do
+        {
+            first_ack_msg = queue->messages + index;
+            if (IsAckMessage(packet_seq_bit, queue, index))
+            {
+                memcpy(first_ack_msg, msg, sizeof(struct message));
+                msg->header.message_type = 0;
+                break;
+            }
+            index = (index + 1) & (ArrayCount(queue->messages) - 1);
+        } while (index != queue->begin);
+
+        Assert(index != queue->begin);
+    }
+
+    Assert(!IsCriticalMessage(msg) || MessageIsAck);
+
+    return msg;
+}
+
 void
-CreatePackages(struct queue_message * queue, i32 packet_type, const void * data, u32 size)
+CreatePackages(const u32 * packet_seq_bit, struct queue_message * queue, enum package_type packet_type, const void * data, u32 size, b32 is_critical)
 {
     i32 order = 0;
     i32 id = (queue->last_id++ & ((1 << 8) - 1));
+    u8 critical_mask = ((u8)(is_critical ? 1 : 0) << 7);
+
+    // create a header package so peer knows needs to create buffer
+    if (size > ArrayCount(queue->messages[0].data))
+    {
+        struct message * msg = GetNextAvailableMessageInQueue(queue, packet_seq_bit);
+        msg->header.id = id;
+        msg->header.order = order;
+        msg->header.message_type = package_type_buffer | critical_mask;
+        msg->header.len = sizeof(struct udp_buffer);
+
+        udp_buffer buffer_msg = { size };
+        memcpy(msg->data, &buffer_msg, sizeof(udp_buffer) );
+
+        order += 1;
+    }
 
     while (size > 0)
     {
         u32 used_size = min(size, sizeof(queue->messages[0].data));
 
-        Assert(
-                ((queue->next + 1) & (ArrayCount(queue->messages) - 1)) !=
-                (queue->begin & (ArrayCount(queue->messages) - 1))
-              );
+        struct message * msg = GetNextAvailableMessageInQueue(queue, packet_seq_bit);
 
+        msg->header.id = id;
+        msg->header.order = order;
+        msg->header.message_type = packet_type | critical_mask;
+        msg->header.len = used_size;
 
-        struct message * pck = 
-            queue->messages + (queue->next++ & (ArrayCount(queue->messages) - 1));
-
-        pck->header.id = id;
-        pck->header.order = order;
-        pck->header.message_type = packet_type;
-        pck->header.len = used_size;
-
-        memcpy(pck->data, data, used_size);
+        memcpy(msg->data, data, used_size);
 
         size -= used_size;
         order += 1;
@@ -414,14 +494,6 @@ printBits(size_t const size, void const * const ptr)
     puts("");
 }
 
-i32
-IsCriticalMessage(message * msg)
-{
-    i32 is_critical = 
-        (msg->header.message_type & (1 << 7)) == (1 << 7);
-
-    return is_critical;
-}
 
 struct console con;
 
@@ -502,10 +574,91 @@ FormatIP(u32 addr, u32 port)
     return format_ip;
 }
 
+#if _WIN32
+BOOL WINAPI 
+HandleCtlC(DWORD dwCtrlType)
+{
+    BOOL signal_handled = false;
+
+    if (dwCtrlType == CTRL_C_EVENT ||
+        dwCtrlType == CTRL_BREAK_EVENT)
+    {
+        AtomicLockAndExchange(keep_alive, 0);
+        signal_handled = true;
+    }
+    else if (dwCtrlType == CTRL_CLOSE_EVENT)
+    {
+        signal_handled = true;
+    }
+
+    return signal_handled;
+}
+
+#endif
+
+void
+InitializeTerminateSignalHandler()
+{
+#ifdef _WIN32
+    SetConsoleCtrlHandler(HandleCtlC, true);
+#else
+#endif
+}
+
+void
+ConsoleAddMessage(const char * format, ...)
+{
+    if (con.current_line > con.max_lines)
+    {
+        con.current_line = con.max_lines;
+        printf(CSI "1S");
+    }
+
+    va_list list;
+    va_start(list, format);
+
+    int output_after_top_margin = con.current_line + con.margin_top;
+
+    ConsoleClearLine(output_after_top_margin);
+    //MoveCursorAbs(output_after_top_margin, 1);
+
+    char out[255];
+    vsprintf_s(out, format, list);
+
+    va_end(list);
+
+    //vprintf(format, list);
+    printf("%.*s", con.size.X - 1,out);
+
+    con.current_line = ++con.current_line;
+}
+
+inline package_type
+GetMessageType(message * msg)
+{
+    package_type result = (package_type)((int)msg->header.message_type & ~(1 << 7));
+
+    return result;
+}
+
 int
 main()
 {
+    InitializeTerminateSignalHandler();
+
     con = Win32CreateVTConsole();
+
+    if (!con.vt_enabled)
+    {
+        logn("Couldn't initialize console virtual seq");
+        return - 1;
+    }
+
+    ConsoleAlternateBuffer();
+    ConsoleClear();
+    SetScrollMargin(&con, 4, 2);
+    MoveCursorAbs(1,1);
+    ConsoleSetTextFormat(2, Background_Black, Foreground_Green);
 
     if (!InitializeSockets())
     {
@@ -521,6 +674,9 @@ main()
 
     struct server * server = CreateServer(&server_arena, Megabytes(10), Megabytes(50), port);
 
+    // TODO: debug ctrl-c stop server gracefully
+    keep_alive = &server->keep_alive;
+
     if (!server)
     {
         logn("Error creating server");
@@ -533,7 +689,7 @@ main()
     server->seed = 12312312;
     srand(server->seed);
 
-    u32 packages_per_second = 10;
+    u32 packages_per_second = 20;
     r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
 
     while ( server->keep_alive )
@@ -548,14 +704,64 @@ main()
             struct client_info ** client_entry = (struct client_info **)server->client_map.entries_begin + entry_index;
             struct client_info * client = (*client_entry);
 
-            u32 bit_to_check = (1 << ((client->server_packet_seq + 1) & (32 - 1)));
+            u32 packet_index_to_check = ((client->server_packet_seq + 1) & (32 - 1));
+            u32 bit_to_check = (1 << packet_index_to_check);
             i32 is_packet_ack = (client->server_packet_seq_bit & bit_to_check) == bit_to_check;
+            i32 is_packet_critical = (client->server_packet_seq_critical & bit_to_check) == bit_to_check;
 
             if (!is_packet_ack)
             {
-                //logn("Package was lost! %u", (client->server_packet_seq - 31));
-                // TODO:
-                // is this a critical package? - issue 
+                if (is_packet_critical)
+                {
+                    ConsoleAddMessage("%s Package was lost! %u (critical?%s)",
+                                        FormatIP(client->addr, client->port).ip ,
+                                        (client->server_packet_seq - 31), 
+                                        is_packet_critical ? "True" : "False");
+
+                    queue_message * queue = &client->queue_msg_to_send;
+                    struct message * msg = queue->messages + queue->next;
+                    i32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
+
+                    Assert(BetweenIn(packet_index,0,32));
+
+                    if (
+                            (packet_index == packet_index_to_check)
+                            &&
+                            IsCriticalMessage(msg)
+                       )
+                    {
+                        // msg at next index needs to be re-sent. simply adv pointer
+                        queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
+                    }
+
+                    int next_index = (queue->next == queue->begin) ? queue->next + 1 : queue->next;
+                    next_index &= (ArrayCount(queue->messages) - 1);
+
+                    // corner case begin == next
+                    for (int i = next_index; 
+                            i != queue->begin; 
+                            i = ( (++i) & (ArrayCount(queue->messages) - 1)))
+                    {
+                        struct message * msg = queue->messages + i;
+                        i32 packet_index = queue->msg_sent_in_package_bit_index[i];
+                        if (
+                                (packet_index == packet_index_to_check)
+                                &&
+                                IsCriticalMessage(msg)
+                           )
+                        {
+                            // we need to send it again. swap if necessary and incr next
+                            if (queue->next != i)
+                            {
+                                struct message * next_msg = (queue->messages + queue->next);
+                                memcpy(next_msg,msg, sizeof(struct message));
+                                memset(msg, 0, sizeof(struct message));
+                            }
+                            queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
+                        }
+                    }
+
+                }
             }
         }
 
@@ -585,7 +791,7 @@ main()
 
                 if (err == EWOULDBLOCK)
                 {
-                    Sleep(10);
+                    Sleep(3);
                 }
                 else if (err == WSAECONNRESET)
                 {
@@ -626,14 +832,14 @@ main()
                 {
                     struct message ** msg = messages + msg_index;
                     *msg = (struct message *)recv_datagram.data + begin_data_offset;
-                    if ( IsCriticalMessage(*msg) )
-                    {
-                        lost_on_purpose = 1;
-                    }
+
+                    // strip critical flag
+                    (*msg)->header.message_type = GetMessageType(*msg);
+
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
 
-                if (lost_on_purpose) 
+                if (!lost_on_purpose) 
                 {
                     //logn("Lost %u on purpose", recv_datagram.header.seq);
                 }
@@ -663,13 +869,17 @@ main()
                                         struct udp_auth * login_data = (udp_auth *)msg->data;
 
                                         log_entry entry;
-                                        sprintf(entry.msg,"user:%s, pwd:%s\n",login_data->user, login_data->pwd);
+                                        sprintf_s(entry.msg,"user:%s, pwd:%s\n",login_data->user, login_data->pwd);
                                         AddClientLogEntry(client,&entry);
 
                                         client->status = client_status_trying_auth;
 
 //#pragma GCC diagnostic ignored "-Wcast-qual"
-                                        CreatePackages(&client->queue_msg_to_send, 0, (const void *)reply, sizeof(reply));
+                                        CreatePackages(&client->server_packet_seq_bit,
+                                                       &client->queue_msg_to_send, 
+                                                       package_type_auth, 
+                                                       (const void *)reply, sizeof(reply), 
+                                                       true);
 
                                         break;
                                     }
@@ -770,8 +980,10 @@ main()
             }
         }
 
+#if 1
+        int entries_to_debug_display = max(server->client_map.entries_count, 5);
         for (int entry_index = 0;
-                 entry_index < 5; //server->client_map.bucket_count;
+                 entry_index < entries_to_debug_display;
                  ++entry_index /* decrement if client removed */)
         {
             struct client_info ** client_entry = (struct client_info **)server->client_map.entries_begin + entry_index;
@@ -783,6 +995,7 @@ main()
                 printf("; Client %s", FormatIP((*client_entry)->addr, (*client_entry)->port).ip);
             }
         }
+#endif
 
         for (int entry_index = 0;
                  entry_index < server->client_map.entries_count;
@@ -809,8 +1022,9 @@ main()
 
                 // signal next seq package as not received
                 client->server_packet_seq += 1;
+                u32 new_package_bit_index = (client->server_packet_seq & 31);
                 client->server_packet_seq_bit = 
-                    (client->server_packet_seq_bit & ~(1 << (client->server_packet_seq & 31)));
+                    (client->server_packet_seq_bit & ~(1 << new_package_bit_index));
 
                 struct packet packet;
                 packet.header.seq       = client->server_packet_seq;
@@ -819,6 +1033,7 @@ main()
                 packet.header.protocol  = PROTOCOL_ID;
                 packet.header.messages  = 0;
 
+                i32 is_critical = 0;
                 u32 current_size = 0;
                 queue_message * queue = &client->queue_msg_to_send;
                 for (u32 i = queue->begin; 
@@ -826,17 +1041,30 @@ main()
                         i = (++i & (ArrayCount(queue->messages) - 1)))
                 {
                     struct message * msg = queue->messages + i;
-                    u32 size = msg ->header.len + sizeof(message_header);
-                    memcpy(packet.data + current_size, msg, size);
+                    u32 msg_size = msg ->header.len + sizeof(message_header);
+                    u32 size_after_msg = (current_size + msg_size);
 
-                    current_size += size;
-                    queue->begin += 1;
-                    packet.header.messages += 1;
-                    if (current_size >= sizeof(packet.data))
+                    if ( size_after_msg <= sizeof(packet.data) )
                     {
-                        break;
+                        memcpy(packet.data + current_size, msg, msg_size);
+
+                        is_critical = is_critical | IsCriticalMessage(msg);
+                        queue->msg_sent_in_package_bit_index[i] = new_package_bit_index;
+
+                        current_size = size_after_msg;
+                        queue->begin = (++queue->begin) & (ArrayCount(queue->messages) - 1);
+                        packet.header.messages += 1;
+                        if (current_size >= sizeof(packet.data))
+                        {
+                            break;
+                        }
                     }
                 }
+
+                client->server_packet_seq_critical = (client->server_packet_seq_critical & (~((u32)1 << new_package_bit_index)));
+                client->server_packet_seq_critical = 
+                    client->server_packet_seq_critical | 
+                    ( (is_critical ? 1 : 0) << new_package_bit_index );
 
                 if (SendPackage(server->handle,client->addr_ip, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
                 {
@@ -848,6 +1076,12 @@ main()
             }
         }
     }
+
+    if (con.vt_enabled)
+    {
+        ConsoleExitAlternateBuffer();
+    }
+
 
     ShutdownServer(server);
 
