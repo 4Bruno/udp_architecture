@@ -191,13 +191,13 @@ ConsoleSetTextFormat(int count_formats, ...)
     int offset_buffer = 0;
     for(int i = 0; i < count_formats; ++i)
     {
-        console_text_formats f = va_arg(list, console_text_formats);
+        int f = va_arg(list, int);
         _itoa_s(f,buffer + offset_buffer, sizeof(buffer) - offset_buffer, 10);
         int size  = 0;
 
         do {
             size += 1;
-            f = (console_text_formats)((float)f / 10.0f);
+            f = (int)((float)f / 10.0f);
         } while (f > 0);
 
         offset_buffer += size;

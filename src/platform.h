@@ -25,6 +25,7 @@
 #define API __attribute__((visibility("default")))
 #define TRUE 1
 #define FALSE 0
+#define INVALID_HANDLE_VALUE 0
 
 // Time
 #include <time.h>
@@ -43,6 +44,11 @@
 #include <unistd.h>
 #define Sleep(n) msleep(n)
 #define sleep(n) msleep(n)
+
+#define sprintf_s snprintf
+#define vsprintf_s vsnprintf
+#define _getwch() getwc(STDIN_FILENO)
+#define _itoa_s(format, buffer, max_size, base) snprintf( (buffer), max_size, "%d", format)
     
 
 #else

@@ -10,7 +10,10 @@
 
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
 
+/* ---------------------------- BEGIN STATIC VARIABLES ----------------------------- */
 static volatile int * keep_alive = 0;
+static struct console con;
+/* ---------------------------- END STATIC VARIABLES ----------------------------- */
 
 struct client_info
 {
@@ -164,7 +167,9 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
 #endif
         memset(&(client->queue_msg_to_send), 0, sizeof(client->queue_msg_to_send));
         // range should fall between 0-31, 32 signal as not set
-        for (int i  = 0; i < ArrayCount(client->queue_msg_to_send.msg_sent_in_package_bit_index); ++i)
+        for (u32 i = 0; 
+                 i < ArrayCount(client->queue_msg_to_send.msg_sent_in_package_bit_index); 
+                 ++i)
         {
             client->queue_msg_to_send.msg_sent_in_package_bit_index[i] = 32;
         }
@@ -383,10 +388,10 @@ IsSeqGreaterThan(u16 a, u16 b)
 b32
 IsAckMessage(const u32 * packet_seq_bit, queue_message * queue, i32 index)
 {
-    i32 pck_bit_index = queue->msg_sent_in_package_bit_index[index];
-    i32 bit_mask = ((u32)1 << pck_bit_index);
+    u32 pck_bit_index = queue->msg_sent_in_package_bit_index[index];
+    u32 bit_mask = ((u32)1 << pck_bit_index);
 
-    i32 is_ack_msg = (*packet_seq_bit & bit_mask) == bit_mask;
+    i32 is_ack_msg = (i32)((*packet_seq_bit & bit_mask) == bit_mask);
 
     return is_ack_msg;
 }
@@ -417,20 +422,20 @@ GetNextAvailableMessageInQueue(struct queue_message * queue, const u32 * packet_
     if (IsCriticalMessage(msg) && !MessageIsAck)
     {
         struct message * first_ack_msg = 0;
-        i32 index = queue->next;
+        u32 index_next = queue->next;
         do
         {
-            first_ack_msg = queue->messages + index;
-            if (IsAckMessage(packet_seq_bit, queue, index))
+            first_ack_msg = queue->messages + index_next;
+            if (IsAckMessage(packet_seq_bit, queue, index_next))
             {
                 memcpy(first_ack_msg, msg, sizeof(struct message));
                 msg->header.message_type = 0;
                 break;
             }
-            index = (index + 1) & (ArrayCount(queue->messages) - 1);
-        } while (index != queue->begin);
+            index_next = (index_next + 1) & (ArrayCount(queue->messages) - 1);
+        } while (index_next != queue->begin);
 
-        Assert(index != queue->begin);
+        Assert(index_next != queue->begin);
     }
 
     Assert(!IsCriticalMessage(msg) || MessageIsAck);
@@ -495,68 +500,6 @@ printBits(size_t const size, void const * const ptr)
 }
 
 
-struct console con;
-
-coord
-Win32GetConsoleSize(struct console * con)
-{
-    CONSOLE_SCREEN_BUFFER_INFO ScreenBufferInfo;
-    GetConsoleScreenBufferInfo(con->handle_out, &ScreenBufferInfo);
-
-    coord Size;
-    Size.X = ScreenBufferInfo.srWindow.Right - ScreenBufferInfo.srWindow.Left + 1;
-    Size.Y = ScreenBufferInfo.srWindow.Bottom - ScreenBufferInfo.srWindow.Top + 1;
-
-    return Size;
-}
-
-struct console
-Win32CreateVTConsole()
-{
-    struct console con;
-    con.vt_enabled= false;
-    con.margin_bottom = 0;
-    con.margin_top = 0;
-    con.count_max_palette_index = 0;
-    con.handle_out = INVALID_HANDLE_VALUE;
-
-    // Set output mode to handle virtual terminal sequences
-    con.handle_out = GetStdHandle(STD_OUTPUT_HANDLE);
-    con.handle_in = GetStdHandle(STD_INPUT_HANDLE);
-
-    if (con.handle_out != INVALID_HANDLE_VALUE &&
-            con.handle_in != INVALID_HANDLE_VALUE)
-    {
-        DWORD dwMode = 0;
-        if (GetConsoleMode(con.handle_out, &dwMode))
-        {
-            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-            if (SetConsoleMode(con.handle_out, dwMode))
-            {
-                con.vt_enabled = true;
-            }
-        }
-#if 0
-        if (GetConsoleMode(con.handle_in, &dwMode))
-        {
-            dwMode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-            if (SetConsoleMode(con.handle_in, dwMode))
-            {
-                con.vt_enabled = con.vt_enabled & true;
-            }
-        }
-#endif
-    }
-
-    if (con.vt_enabled)
-    {
-        con.size = Win32GetConsoleSize(&con);
-        con.current_line = 0;
-        con.max_lines = con.size.Y;
-    }
-
-    return con;
-}
 
 struct format_ip
 {
@@ -567,7 +510,7 @@ format_ip
 FormatIP(u32 addr, u32 port)
 { 
     struct format_ip format_ip;
-    sprintf_s(format_ip.ip, "[%3i.%3i.%3i.%3i|%5.5i]", 
+    sprintf_s(format_ip.ip,ArrayCount(format_ip.ip), "[%3i.%3i.%3i.%3i|%5.5i]", 
             (addr >> 24), (addr >> 16)  & 0xFF, (addr >> 8)   & 0xFF, (addr >> 0)   & 0xFF,
             port);
 
@@ -623,14 +566,14 @@ ConsoleAddMessage(const char * format, ...)
     //MoveCursorAbs(output_after_top_margin, 1);
 
     char out[255];
-    vsprintf_s(out, format, list);
+    vsprintf_s(out,ArrayCount(out), format, list);
 
     va_end(list);
 
     //vprintf(format, list);
     printf("%.*s", con.size.X - 1,out);
 
-    con.current_line = ++con.current_line;
+    con.current_line += 1;
 }
 
 inline package_type
@@ -646,7 +589,7 @@ main()
 {
     InitializeTerminateSignalHandler();
 
-    con = Win32CreateVTConsole();
+    con = CreateVirtualSeqConsole();
 
     if (!con.vt_enabled)
     {
@@ -720,7 +663,7 @@ main()
 
                     queue_message * queue = &client->queue_msg_to_send;
                     struct message * msg = queue->messages + queue->next;
-                    i32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
+                    u32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
 
                     Assert(BetweenIn(packet_index,0,32));
 
@@ -731,19 +674,20 @@ main()
                        )
                     {
                         // msg at next index needs to be re-sent. simply adv pointer
-                        queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
+                        queue->next += 1;
+                        queue->next &= (ArrayCount(queue->messages) - 1);
                     }
 
                     int next_index = (queue->next == queue->begin) ? queue->next + 1 : queue->next;
                     next_index &= (ArrayCount(queue->messages) - 1);
 
                     // corner case begin == next
-                    for (int i = next_index; 
-                            i != queue->begin; 
-                            i = ( (++i) & (ArrayCount(queue->messages) - 1)))
+                    for (u32 i  = next_index; 
+                             i != queue->begin; 
+                            /* in loop code */)
                     {
-                        struct message * msg = queue->messages + i;
-                        i32 packet_index = queue->msg_sent_in_package_bit_index[i];
+                        msg = queue->messages + i;
+                        packet_index = queue->msg_sent_in_package_bit_index[i];
                         if (
                                 (packet_index == packet_index_to_check)
                                 &&
@@ -757,8 +701,11 @@ main()
                                 memcpy(next_msg,msg, sizeof(struct message));
                                 memset(msg, 0, sizeof(struct message));
                             }
-                            queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
+                            queue->next += 1; 
+                            queue->next &= (ArrayCount(queue->messages) - 1);
                         }
+                        i += 1;
+                        i &= (ArrayCount(queue->messages) - 1);
                     }
 
                 }
@@ -869,7 +816,7 @@ main()
                                         struct udp_auth * login_data = (udp_auth *)msg->data;
 
                                         log_entry entry;
-                                        sprintf_s(entry.msg,"user:%s, pwd:%s\n",login_data->user, login_data->pwd);
+                                        sprintf_s(entry.msg, ArrayCount(entry.msg),"user:%s, pwd:%s\n",login_data->user, login_data->pwd);
                                         AddClientLogEntry(client,&entry);
 
                                         client->status = client_status_trying_auth;
@@ -989,7 +936,7 @@ main()
             struct client_info ** client_entry = (struct client_info **)server->client_map.entries_begin + entry_index;
             int line = (con.margin_top == 0 ? 1 : con.margin_top) + entry_index;
             ConsoleClearLine(line);
-            printf("[%i] ptr: %p", entry_index ,*client_entry);
+            printf("[%i] ptr: %p", entry_index , (void *)*client_entry);
             if (*client_entry)
             {
                 printf("; Client %s", FormatIP((*client_entry)->addr, (*client_entry)->port).ip);
@@ -1038,7 +985,7 @@ main()
                 queue_message * queue = &client->queue_msg_to_send;
                 for (u32 i = queue->begin; 
                         i != queue->next; 
-                        i = (++i & (ArrayCount(queue->messages) - 1)))
+                        /* in loop code */)
                 {
                     struct message * msg = queue->messages + i;
                     u32 msg_size = msg ->header.len + sizeof(message_header);
@@ -1052,13 +999,17 @@ main()
                         queue->msg_sent_in_package_bit_index[i] = new_package_bit_index;
 
                         current_size = size_after_msg;
-                        queue->begin = (++queue->begin) & (ArrayCount(queue->messages) - 1);
+                        queue->begin += 1; 
+                        queue->begin &= (ArrayCount(queue->messages) - 1);
                         packet.header.messages += 1;
                         if (current_size >= sizeof(packet.data))
                         {
                             break;
                         }
                     }
+
+                    i += 1;
+                    i &= (ArrayCount(queue->messages) - 1);
                 }
 
                 client->server_packet_seq_critical = (client->server_packet_seq_critical & (~((u32)1 << new_package_bit_index)));

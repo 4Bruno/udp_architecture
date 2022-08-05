@@ -1,12 +1,15 @@
 #ifndef CONSOLE_SEQUENCES_H
 #define CONSOLE_SEQUENCES_H
 
+#include "platform.h"
+
 #define ESC "\x1b"
 // for comparison eq x == ESC_EQ
 #define ESC_EQ '\x1b'
 #define CSI "\x1b["
 #define OSC "\x1b]"
 #define OSC_END ESC "\\"
+
 
 struct coord
 {
@@ -87,5 +90,10 @@ enum console_text_formats
     Bright_Background_Cyan		=106, //Applies bold/bright cyan to background
     Bright_Background_White		=107, //Applies bold/bright white to background
 };
+
+
+#define CREATE_VIRTUAL_SEQ_CONSOLE(name)  console name()
+typedef CREATE_VIRTUAL_SEQ_CONSOLE(create_virtual_seq_console);
+API CREATE_VIRTUAL_SEQ_CONSOLE(CreateVirtualSeqConsole);
 
 #endif
