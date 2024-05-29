@@ -241,7 +241,11 @@ main(int argc, char * argv[])
 
     real_time perf_freq = GetClockResolution();
 
+#if 0
     u32 packages_per_second = PACKAGES_PER_SECOND;
+#else
+    u32 packages_per_second = 10;
+#endif
     r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
     // http://www.geisswerks.com/ryan/FAQS/timing.html
     // Sleep will do granular scheduling up to 1ms
@@ -507,6 +511,10 @@ main(int argc, char * argv[])
         {
             logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());
             keep_alive = 0;
+        }
+        else
+        {
+            logn("Sending package %i.", packet.header.seq);
         }
 
         //Assert(packet.seq != 34);

@@ -479,6 +479,7 @@ main()
             sockaddr_in from;
             socklen_t fromLength = sizeof( from );
 
+            // lock
             int bytes = recvfrom( server->handle, 
                     (char *)&recv_datagram, max_packet_size, 
                     0, 
@@ -539,9 +540,12 @@ main()
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
 
+#if 0
                 i32 lost_on_purpose = (rand() % 10) == 0;
-
-                //if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
+                if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
+#else
+                i32 lost_on_purpose = 0;
+#endif
 
                 if (!lost_on_purpose)
                 {
@@ -552,7 +556,8 @@ main()
                             (from_address >> 16)  & 0xFF0000,
                             (from_address >> 8)   & 0xFF00,
                             (from_address >> 0)   & 0xFF,
-                            recv_datagram.seq, recv_datagram.msg); 
+                            recv_datagram.header.seq, 
+                            (char *)((u8 *)recv_datagram.data + sizeof(message_header))); 
 #endif
                     switch (client->status)
                     {
