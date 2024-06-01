@@ -11,7 +11,7 @@
 
 /* ---------------------------- BEGIN STATIC VARIABLES ----------------------------- */
 static volatile int * keep_alive = 0;
-static struct console con;
+static struct console con = {};
 /* ---------------------------- END STATIC VARIABLES ----------------------------- */
 
 struct client_info
@@ -184,7 +184,7 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
 
         *ptr_client = client;
 
-        ConsoleAppendAt(1, 40 , "New client [%i.%i.%i.%i|%i]",
+        ConsoleAppendAt(&con,1, 40 , "New client [%i.%i.%i.%i|%i]",
                                 (addr >> 24),
                                 (addr >> 16)  & 0xFF,
                                 (addr >> 8)   & 0xFF,
@@ -210,7 +210,7 @@ RemoveClient(u32 addr, u32 port, struct hash_map * client_map)
 
     (*parent) = (*parent)->next;
 
-    ConsoleAppendAt(1, 40 ,"Removing client [%i.%i.%i.%i|%i]",
+    ConsoleAppendAt(&con,1, 40 ,"Removing client [%i.%i.%i.%i|%i]",
                             (addr >> 24),
                             (addr >> 16)  & 0xFF,
                             (addr >> 8)   & 0xFF,
@@ -257,7 +257,7 @@ RemoveClient(struct client_info * client, struct hash_map * client_map)
 }
 
 
-struct server
+struct server_handler
 {
     memory_arena permanent_arena;
     memory_arena transient_arena;
@@ -274,14 +274,14 @@ struct server
 };
 
 
-struct server *
+struct server_handler *
 CreateServer(memory_arena * server_arena, u32 PermanentMemorySize, u32 TransientMemorySize, i32 port)
 {
-    struct server * server = 0;
+    struct server_handler * server = 0;
 
     Assert(server_arena);
 
-    u32 total_mem_req = PermanentMemorySize + TransientMemorySize + sizeof(struct server);
+    u32 total_mem_req = PermanentMemorySize + TransientMemorySize;
     u32 server_capacity = (server_arena->max_size - server_arena->size);
 
     if (total_mem_req > server_capacity)
@@ -319,13 +319,14 @@ CreateServer(memory_arena * server_arena, u32 PermanentMemorySize, u32 Transient
         return 0;
     }
 
-    server = (struct server *)PushSize(server_arena, total_mem_req);
+    server = PushStruct(server_arena, server_handler);
 
-    server->permanent_arena.base = (char *)server + sizeof(struct server);
-    server->permanent_arena.max_size = PermanentMemorySize;
+    u32 PermanentMemorySizeAvailable = PermanentMemorySize - sizeof(server_handler);
+    server->permanent_arena.base = PushSize(server_arena, PermanentMemorySizeAvailable);
+    server->permanent_arena.max_size = PermanentMemorySizeAvailable;
     server->permanent_arena.size = 0;
 
-    server->transient_arena.base = (char *)server->permanent_arena.base + PermanentMemorySize;
+    server->transient_arena.base = PushSize(server_arena, TransientMemorySize);
     server->transient_arena.max_size = TransientMemorySize;
     server->transient_arena.size = 0;
 
@@ -354,7 +355,7 @@ CreateServer(memory_arena * server_arena, u32 PermanentMemorySize, u32 Transient
 }
 
 void
-ShutdownServer(struct server * server)
+ShutdownServer(struct server_handler * server)
 {
     CloseSocket(server->handle);
 }
@@ -558,10 +559,19 @@ GetMessageType(message * msg)
 int
 main()
 {
+
     /* BEGIN TERMINAL */
     InitializeTerminateSignalHandler();
 
-    con = CreateVirtualSeqConsole();
+    memory_arena ConsoleArena;
+    ConsoleArena.max_size = Kilobytes(16);
+    ConsoleArena.base = malloc(ConsoleArena.max_size);
+    ConsoleArena.size = 0;
+
+    con = CreateConsole(&ConsoleArena);
+    con.margin_top = 5;
+    con.margin_bottom = 1;
+    con.current_line = con.margin_top + 1;
 
     if (!con.vt_enabled)
     {
@@ -569,19 +579,11 @@ main()
         return - 1;
     }
 
-    ConsoleAlternateBuffer();
-    MoveCursorAbs(1,1);
-    ConsoleClear();
-    SetScrollMargin(&con, 4, 2);
-    ConsoleSetTextFormat(2, Background_Black, Foreground_Green);
-    ConsoleClearBuffers();
-    ConsoleSetWidth80();
+    StdinSetNonBlocking();
+    InitTermios(0);
 
-    set_non_blocking_mode();
-    initTermios(0);
-
-    ConsoleAppendAt(0,0,"Client List");
-    ConsoleAppendAt(0,40,"Logs");
+    ConsoleAppendAt(&con,5,0,"Client List");
+    ConsoleAppendAt(&con,5,40,"Logs");
 
     /* END TERMINAL */
 
@@ -594,11 +596,11 @@ main()
     int port = 30000;
 
     memory_arena server_arena;
-    server_arena.max_size = Megabytes(512);
+    server_arena.max_size = Megabytes(32);
     server_arena.base = malloc(server_arena.max_size);
     server_arena.size = 0;
 
-    struct server * server = CreateServer(&server_arena, Megabytes(10), Megabytes(50), port);
+    struct server_handler * server = CreateServer(&server_arena, Megabytes(8), Megabytes(24), port);
     /* END SOCKETS */
 
     // TODO: debug ctrl-c stop server gracefully
@@ -611,7 +613,7 @@ main()
     }
 
     real_time clock_freq = GetClockResolution();
-    mkdir(".\\clients\\");
+    //mkdir(".\\clients\\");
 
     server->seed = 12312312;
     srand(server->seed);
@@ -625,7 +627,7 @@ main()
         starting_time = GetRealTime();
 
 
-        char c = getch();
+        char c = GetChar();
 
         if (c == 'q')
         {
@@ -650,7 +652,7 @@ main()
                 if (is_packet_critical)
                 {
                     
-                    ConsoleAppendAt(10,0,
+                    ConsoleAppendAt(&con,10,0,
                                 "%s Package was lost! %u (critical?%s)",
                                 FormatIP(client->addr, client->port).ip ,
                                 (client->server_packet_seq - 31), 
@@ -734,7 +736,7 @@ main()
 
                 if (err == EWOULDBLOCK)
                 {
-                    usleep(100000);
+                    STALL(1000);
                 }
                 else if (err == WSAECONNRESET)
                 {
@@ -782,17 +784,9 @@ main()
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
 
-<<<<<<< HEAD
-#if 0
-                i32 lost_on_purpose = (rand() % 10) == 0;
-                if (lost_on_purpose) logn("Lost %u on purpose", recv_datagram.header.seq);
-#else
-                i32 lost_on_purpose = 0;
-#endif
-
                 if (!lost_on_purpose)
                 {
-                    // process received packet
+
 #if 0
                     logn("[%i.%i.%i.%i] Message (%u) received %s", 
                             (from_address >> 24),
@@ -802,15 +796,6 @@ main()
                             recv_datagram.header.seq, 
                             (char *)((u8 *)recv_datagram.data + sizeof(message_header))); 
 #endif
-=======
-                if (!lost_on_purpose) 
-                {
-                    //logn("Lost %u on purpose", recv_datagram.header.seq);
-                }
-
-                if (!lost_on_purpose)
-                {
->>>>>>> server_cross_platform
                     switch (client->status)
                     {
                         case client_status_in_game:
@@ -955,7 +940,7 @@ main()
             if (*client_entry)
             {
                 int start_line = 1 + entry_index;
-                ConsoleAppendAt(start_line,0,
+                ConsoleAppendAt(&con,start_line,0,
                              "[%i] Client %s", 
                              entry_index,
                              FormatIP((*client_entry)->addr, (*client_entry)->port).ip);
@@ -1044,15 +1029,10 @@ main()
                 client->last_message_from_server = GetRealTime();
             }
         }
-        ConsoleSwapBuffer();
+        ConsoleSwapBuffer(&con);
     }
 
-    if (con.vt_enabled)
-    {
-        ConsoleExitAlternateBuffer();
-        fflush(STDIN_FILENO);
-        resetTermios();
-    }
+    DestroyConsole(&con);
 
     ShutdownServer(server);
 

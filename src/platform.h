@@ -56,6 +56,7 @@
 
 #endif
 
+#include <stdio.h>
 #include <stdint.h>
 #include <limits.h>
 
@@ -117,6 +118,31 @@ PushSize_(memory_arena * arena, i32 size)
 
     return base;
 }
+
+#define STDIN_SET_NON_BLOCKING(name)  void name()
+typedef STDIN_SET_NON_BLOCKING(stdin_set_non_blocking);
+API STDIN_SET_NON_BLOCKING(StdinSetNonBlocking);
+
+#define STDIN_SET_BLOCKING(name)  void name()
+typedef STDIN_SET_BLOCKING(stdin_set_blocking);
+API STDIN_SET_BLOCKING(StdinSetBlocking);
+
+#define GET_CHAR(name)  char name()
+typedef GET_CHAR(get_char);
+API GET_CHAR(GetChar);
+
+/* ---------------- WINDOWS ---------------- */
+#ifdef _WIN32
+#define STALL(ms) Sleep(ms)
+
+/* ---------------- LINUX ---------------- */
+#elif defined __linux__
+#define STALL(ms) usleep((r32)ms * 1000.0f)
+
+#else
+#error Unhandled OS
+
+#endif
 
 #define PORTABLE_PLATFORM_H
 #endif

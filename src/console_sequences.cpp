@@ -4,55 +4,47 @@
  * which might be confusing at times, depending on your background
  */
 #include "console_sequences.h"
-
-//#include <windows.h>
-#include <stdlib.h>
-#include <stdio.h>
+//#include <stdlib.h>
 #include <stdint.h>
 #include <stdarg.h>
-#include <fcntl.h>
-#include <termios.h>
 
-
-typedef uint32_t u32;
-
-static struct termios terminal_session_old;
-static struct termios terminal_session_current;
-
-#define CONSOLE_BUFFER_HEIGHT 24
-#define CONSOLE_BUFFER_WIDTH 80
-static char console_back_buffer[CONSOLE_BUFFER_HEIGHT][CONSOLE_BUFFER_WIDTH + 1];
-static char console_front_buffer[CONSOLE_BUFFER_HEIGHT][CONSOLE_BUFFER_WIDTH + 1];
+#define OFFSET_BACK(c,y) (con->back_buffer + (y * (con->buffer_size.X + 1)))
+#define OFFSET_BACK_X(c,y,x) (con->back_buffer + (y * (con->buffer_size.X + 1)) + x)
 
 void
-ConsoleDraw(int at_line,const char * format, ...)
+ConsoleDraw(console * con, int at_line,const char * format, ...)
 {
     va_list list;
     va_start(list, format);
 
-    vsnprintf(console_back_buffer[at_line],CONSOLE_BUFFER_WIDTH + 1, format, list);
+    vsnprintf(OFFSET_BACK(con,at_line),con->buffer_size.X + 1, format, list);
 
     va_end(list);
 }
 
 /* prevents from writing \0 at the end of string */
 void
-ConsoleAppendAt(int at_line, int at_start, const char * format, ...)
+ConsoleAppendAt(console * con, int at_line, int at_start, const char * format, ...)
 {
-    if (at_start > CONSOLE_BUFFER_WIDTH) return;
+    if (at_start > con->buffer_size.X) return;
+    if (at_line > con->buffer_size.Y) return;
+    if (at_start < 0) return;
+    if (at_line < 0) return;
+
     va_list list;
     va_start(list, format);
 
-    int err = vsnprintf((console_back_buffer[at_line] + at_start),CONSOLE_BUFFER_WIDTH + 1 - at_start, format, list);
+    char * buffer = OFFSET_BACK_X(con,at_line, at_start);
+    int err = vsnprintf( buffer ,con->buffer_size.X + 1 - at_start, format, list);
     if (err > 0)
     {
-        console_back_buffer[at_line][at_start + err] = ' ';
+        *(buffer + err ) = ' ';
     }
-    //memset(console_back_buffer[at_line],'-',at_start);
 
     va_end(list);
 }
 
+#if 0
 void
 ConsoleAppend(int at_line,const char * format, ...)
 {
@@ -74,83 +66,48 @@ ConsoleAppend(int at_line,const char * format, ...)
 
     va_end(list);
 }
+#endif
 
 void
-ConsoleClearBuffers()
+ConsoleClearBuffers(console * con)
 {
-    memset(console_back_buffer,' ',CONSOLE_BUFFER_HEIGHT * (CONSOLE_BUFFER_WIDTH + 1));
-    for (int i = 0;
-            i < CONSOLE_BUFFER_HEIGHT;
-            ++i)
+    for (i32 i = 0; i < 2; ++i)
     {
-        console_back_buffer[i][CONSOLE_BUFFER_WIDTH] = '\0';
-    }
-
-    memset(console_front_buffer,' ',CONSOLE_BUFFER_HEIGHT * (CONSOLE_BUFFER_WIDTH + 1));
-    for (int i = 0;
-            i < CONSOLE_BUFFER_HEIGHT;
-            ++i)
-    {
-        console_front_buffer[i][CONSOLE_BUFFER_WIDTH] = '\0';
+        char * buffer = con->buffers[i];
+        memset(buffer,' ',con->buffer_size.Y * (con->buffer_size.X + 1));
+        u32 offset_x = con->buffer_size.X;
+        for (int y = 0;
+                y < con->buffer_size.Y;
+                ++y)
+        {
+            u32 offset_y = (con->buffer_size.X + 1) * y;
+            *(buffer + offset_y + offset_x) = '\0';
+        }
     }
 }
 
 void
-ConsoleSwapBuffer()
+ConsoleSwapBuffer(console * con)
 {
-    printf("\x1b[H");  // Move cursor to home position
+    // Cursor to home
+    printf("\x1b[H");
+
     for (int y = 0; 
-             y < CONSOLE_BUFFER_HEIGHT; 
+             y < con->buffer_size.Y; 
              ++y) 
     {
-        int mem_cmp = memcmp(console_front_buffer[y], console_back_buffer[y], CONSOLE_BUFFER_WIDTH);
+
+        u32 offset_y = (con->buffer_size.X + 1) * y;
+        char* front_buffer = con->front_buffer + offset_y;
+        char* back_buffer = con->back_buffer + offset_y;
+        int mem_cmp = memcmp(front_buffer, back_buffer,  con->buffer_size.X);
         if ( mem_cmp != 0 ) 
         {
-            printf("\x1b[%d;1H%s", y + 1, console_back_buffer[y]);
-            memcpy(console_front_buffer[y], console_back_buffer[y], CONSOLE_BUFFER_WIDTH);
+            printf("\x1b[%d;1H%s", y + 1, back_buffer);
+            memcpy(front_buffer, back_buffer, con->buffer_size.X);
         }
     }
     fflush(stdout);
-}
-
-void initTermios(int echo) 
-{
-  tcgetattr(STDIN_FILENO, &terminal_session_old);
-  terminal_session_current = terminal_session_old;
-  /* disable buffered i/o */
-  terminal_session_current.c_lflag &= ~ICANON; 
-  if (echo) {
-      terminal_session_current.c_lflag |= ECHO; 
-  } else {
-      terminal_session_current.c_lflag &= ~ECHO; 
-  }
-  tcsetattr(STDIN_FILENO, TCSANOW, &terminal_session_current); 
-}
-
-void resetTermios(void) 
-{
-  tcsetattr(STDIN_FILENO, TCSANOW, &terminal_session_old);
-}
-
-char getch() 
-{
-  char ch;
-  //ch = getchar();
-  int result = read(STDIN_FILENO,&ch,1);
-  if (result <= 0)
-      ch = EOF;
-  return ch;
-}
-
-void set_non_blocking_mode() {
-    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
-}
-
-// Function to reset stdin to blocking mode
-void set_blocking_mode() {
-    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK);
 }
 
 void
@@ -194,10 +151,10 @@ ValidateEscResponse()
 {
     bool valid = false;
     int wch;
-    wch = getch();
+    wch = GetChar();
     if (wch == '\x1b')
     {
-        wch = getch();
+        wch = GetChar();
         valid = (wch == '[');
     }
 
@@ -208,11 +165,11 @@ wchar_t
 GetFunctionKey()
 {
     int wch;
-    wch = getch();
+    wch = GetChar();
     {
         if (wch == 0 || wch == 0xE0)
         {
-            wch = getch();
+            wch = GetChar();
         }
     }
 
@@ -225,12 +182,12 @@ ParseResponseInt(char stop_if)
     char buffer[10];
     int wch;
     int size = 0;
-    while ( (wch = getch()) && wch != stop_if)
+    while ( (wch = GetChar()) && wch != stop_if)
     {
         buffer[size++] = wch;
         if (wch == 0 || wch == 0xE0)
         {
-            wch = getch();
+            wch = GetChar();
         }
     }
 
@@ -428,4 +385,55 @@ void
 ConsoleScrollUp(int x = 1)
 {
     printf(CSI "%iS", x);
+}
+
+
+console
+CreateConsole(memory_arena * Arena,i32 Width = 80, i32 Height = 24)
+{
+
+    console con = {};
+
+    CreateVirtualSeqConsole(&con);
+    
+    if (con.vt_enabled)
+    {
+        ConsoleAlternateBuffer();
+        ConsoleClear();
+        SetScrollMargin(&con, 4, 2);
+        MoveCursorAbs(1,1);
+        ConsoleSetTextFormat(2, Background_Black, Foreground_Green);
+
+        u32 WidthPlusOne = Width + 1;
+        u32 req_size = WidthPlusOne * Height * sizeof(u8);
+
+        u32 AvailableMemory = Arena->max_size - Arena->size;
+        Assert(AvailableMemory > (req_size * 2));
+
+        con.buffers[0] = (char *)PushSize(Arena, req_size);
+        con.buffers[1] = (char *)PushSize(Arena, req_size);
+
+        con.buffer_size.X = Width;
+        con.buffer_size.Y = Height;
+
+        con.margin_top = 0;
+        con.margin_bottom = 0;
+
+        con.current_line = 0;
+        con.max_lines = con.size.Y;
+
+        ConsoleClearBuffers(&con);
+    }
+
+    return con;
+}
+
+void
+DestroyConsole(console * con)
+{
+    if (con->vt_enabled)
+    {
+        ConsoleExitAlternateBuffer();
+        ResetTermios();
+    }
 }

@@ -10,24 +10,31 @@
 #define OSC "\x1b]"
 #define OSC_END ESC "\\"
 
+/* ---------------- WINDOWS ---------------- */
+#ifdef _WIN32
+#include <windows.h>
+
+/* ---------------- LINUX ---------------- */
+#elif defined __linux__
+
+#include <fcntl.h>
+#include <termios.h>
+
+static struct termios terminal_session_old;
+static struct termios terminal_session_current;
+
+
+/* ---------------- UNKNOWN ---------------- */
+#else
+#error Unhandled OS
+
+#endif
 
 struct coord
 {
     int X,Y;
 };
 
-struct console
-{
-    void * handle_out;
-    void * handle_in;
-    bool vt_enabled;
-    int margin_top, margin_bottom;
-    int count_max_palette_index;
-    coord size;
-
-    int current_line;
-    int max_lines;
-};
 
 struct pos
 {
@@ -92,8 +99,44 @@ enum console_text_formats
 };
 
 
-#define CREATE_VIRTUAL_SEQ_CONSOLE(name)  console name()
+struct console;
+#define CREATE_VIRTUAL_SEQ_CONSOLE(name)  void name(console * con)
 typedef CREATE_VIRTUAL_SEQ_CONSOLE(create_virtual_seq_console);
 API CREATE_VIRTUAL_SEQ_CONSOLE(CreateVirtualSeqConsole);
+
+#define INIT_TERMIOS(name)  void name(int echo)
+typedef INIT_TERMIOS(init_termios);
+API INIT_TERMIOS(InitTermios);
+
+#define RESET_TERMIOS(name)  void name()
+typedef RESET_TERMIOS(reset_termios);
+API RESET_TERMIOS(ResetTermios);
+
+#define GET_TERMINAL_SIZE(name)  coord name()
+typedef GET_TERMINAL_SIZE(get_terminal_size);
+API GET_TERMINAL_SIZE(GetTerminalSize);
+
+struct console
+{
+    bool vt_enabled;
+
+    int margin_top, margin_bottom;
+    int count_max_palette_index;
+
+    coord size;
+
+    u32 current_line;
+    int max_lines;
+
+    union
+    {
+        char * buffers[2];
+        struct {
+            char * front_buffer;
+            char * back_buffer;
+        };
+    };
+    coord buffer_size;
+};
 
 #endif

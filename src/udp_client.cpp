@@ -124,10 +124,10 @@ IPToU32(const char * ip_s)
     u32 inv_max_ip = (~(u32)255);
     const char * err_msg = "Error parsing ip address. Expected format (nnn.xxx.yyy.zzz). Values between 0-255";
 
-    u32 len = (u32)strlen(ip_s);
+    //u32 len = (u32)strlen(ip_s);
     for (char * c = (char *)ip_s; *c != 0; ++c)
     {
-        u32 range_ip = strtoul(c, &c, 10); // will move to next '.' or \0
+        range_ip = strtoul(c, &c, 10); // will move to next '.' or \0
 
         if ( (range_ip & inv_max_ip) > 0)
         {
@@ -201,7 +201,7 @@ b32
 IsAckMessage(const u32 * packet_seq_bit, queue_message * queue, i32 index)
 {
     i32 pck_bit_index = queue->msg_sent_in_package_bit_index[index];
-    i32 bit_mask = ((u32)1 << pck_bit_index);
+    u32 bit_mask = ((u32)1 << pck_bit_index);
 
     i32 is_ack_msg = (*packet_seq_bit & bit_mask) == bit_mask;
 
@@ -225,7 +225,7 @@ GetNextAvailableMessageInQueue(struct queue_message * queue, const u32 * packet_
     if (IsCriticalMessage(msg) && !MessageIsAck)
     {
         struct message * first_ack_msg = 0;
-        i32 index = queue->next;
+        u32 index = queue->next;
         do
         {
             first_ack_msg = queue->messages + index;
@@ -286,48 +286,8 @@ CreatePackages(const u32 * packet_seq_bit, struct queue_message * queue, enum pa
     }
 }
 
-coord
-Win32GetConsoleSize(struct console * con)
-{
-    CONSOLE_SCREEN_BUFFER_INFO ScreenBufferInfo;
-    GetConsoleScreenBufferInfo(con->handle_out, &ScreenBufferInfo);
-
-    coord Size;
-    Size.X = ScreenBufferInfo.srWindow.Right - ScreenBufferInfo.srWindow.Left + 1;
-    Size.Y = ScreenBufferInfo.srWindow.Bottom - ScreenBufferInfo.srWindow.Top + 1;
-
-    return Size;
-}
 
 struct console con;
-
-void
-ConsoleAddMessage(const char * format, ...)
-{
-    if (con.current_line > con.max_lines)
-    {
-        con.current_line = con.max_lines;
-        printf(CSI "1S");
-    }
-
-    va_list list;
-    va_start(list, format);
-
-    int output_after_top_margin = con.current_line + con.margin_top;
-
-    ConsoleClearLine(output_after_top_margin);
-    //MoveCursorAbs(output_after_top_margin, 1);
-
-    char out[255];
-    vsprintf_s(out, format, list);
-
-    va_end(list);
-
-    //vprintf(format, list);
-    printf("%.*s", con.size.X - 1,out);
-
-    con.current_line = ++con.current_line;
-}
 
 void
 ConsolePrintstatus(const char * format, ...)
@@ -353,7 +313,7 @@ ConsoleUpdateMetrics(r32 time_frame_elapsed, r32 avg_package_roundtrip)
     ConsoleSaveCursor();
     MoveCursorAbs(metrics_line, 1);
     ConsoleClearLine(metrics_line);
-    printf("fps: %3.1f, roundtrip: %3.1f",time_frame_elapsed,avg_package_roundtrip);
+    printf("fps: %3.1f, roundtrip: %3.1f",1000.0f / time_frame_elapsed,avg_package_roundtrip);
     ConsoleRestoreCursor();
 }
 
@@ -390,21 +350,29 @@ FormatIP(u32 addr, u32 port)
 int
 main(int argc, char * argv[])
 {
+    memory_arena Arena;
+    Arena.max_size = Megabytes(16);
+    Arena.base = malloc(Arena.max_size);
+    Arena.size = 0;
+
     InitializeTerminateSignalHandler();
 
-    con = Win32CreateVTConsole();
-    
+    console con = CreateConsole(&Arena);
+    con.margin_top = 5;
+    con.margin_bottom = 1;
+    con.current_line = con.margin_top + 1;
+
     if (!con.vt_enabled)
     {
-        logn("Couldn't initialize console virtual seq");
-        return - 1;
+        printf("Terminal can't handle ANSI escaped commands (virtual terminal). Press any key to close this prompt.");
+        char c = GetChar();
+        while (c == EOF)
+        {
+            c = GetChar();
+            STALL(50);
+        }
+        return -1;
     }
-
-    ConsoleAlternateBuffer();
-    ConsoleClear();
-    SetScrollMargin(&con, 4, 2);
-    MoveCursorAbs(1,1);
-    ConsoleSetTextFormat(2, Background_Black, Foreground_Green);
 
     if (!InitializeSockets())
     {
@@ -462,7 +430,7 @@ main(int argc, char * argv[])
     u32 remote_seq_bit = ~0;
     real_time packet_seq_realtime[32];
     delta_time packet_seq_deltatime[32];
-    for (i32 i = 0; i < ArrayCount(packet_seq_realtime); ++i)
+    for (u32 i = 0; i < ArrayCount(packet_seq_realtime); ++i)
     {
         ZeroTime(packet_seq_realtime[i]);
         packet_seq_deltatime[i] = 0.0f;
@@ -477,28 +445,24 @@ main(int argc, char * argv[])
 
     real_time perf_freq = GetClockResolution();
 
-<<<<<<< HEAD
-#if 0
-=======
 #define PACKAGES_PER_SECOND 32
-
->>>>>>> server_cross_platform
+#if 0
     u32 packages_per_second = PACKAGES_PER_SECOND;
 #else
-    u32 packages_per_second = 10;
+    u32 packages_per_second = 2;
 #endif
     r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
     // http://www.geisswerks.com/ryan/FAQS/timing.html
     // Sleep will do granular scheduling up to 1ms
     timeBeginPeriod(1);
 
-    ConsolePrintstatus("Start sending msg to server (rate speed %i packages per second)",PACKAGES_PER_SECOND);
+    ConsolePrintstatus("Start sending msg to server (rate speed %i packages per second)",packages_per_second);
 
     client_status my_status_with_server = client_status_none;
 
     queue_message queue_msg_to_send;
     memset(&queue_msg_to_send, 0, sizeof(queue_message));
-    for (int i  = 0; i < ArrayCount(queue_msg_to_send.msg_sent_in_package_bit_index); ++i)
+    for (u32 i  = 0; i < ArrayCount(queue_msg_to_send.msg_sent_in_package_bit_index); ++i)
     {
         queue_msg_to_send.msg_sent_in_package_bit_index[i] = 32;
     }
@@ -509,7 +473,12 @@ main(int argc, char * argv[])
 
         starting_time = GetRealTime();
 
-        i32 any_pkc_sent = 0;
+        char c = GetChar();
+
+        if (c == 'q')
+        {
+            keep_alive = false;
+        }
 
         u32 packet_index_to_check = (packet_seq + 1) & (32 - 1);
         u32 packet_bit_index_to_check = (1 << packet_index_to_check);
@@ -518,12 +487,12 @@ main(int argc, char * argv[])
 
         if (!is_packet_ack)
         {
-            ConsoleAddMessage("Package was lost! %u (critical?%s)", (packet_seq - 31), is_packet_critical ? "True" : "False");
+            //ConsoleAddMessage("Package was lost! %u (critical?%s)", (packet_seq - 31), is_packet_critical ? "True" : "False");
             if (is_packet_critical)
             {
                 queue_message * queue = &queue_msg_to_send;
                 struct message * msg = queue->messages + queue->next;
-                i32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
+                u32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
 
                 Assert(BetweenIn(packet_index,0,32));
 
@@ -541,12 +510,12 @@ main(int argc, char * argv[])
                 next_index &= (ArrayCount(queue->messages) - 1);
 
                 // corner case begin == next
-                for (int i = next_index; 
+                for (u32 i = next_index; 
                          i != queue->begin; 
                          i = ( (++i) & (ArrayCount(queue->messages) - 1)))
                 {
                     struct message * msg = queue->messages + i;
-                    i32 packet_index = queue->msg_sent_in_package_bit_index[i];
+                    u32 packet_index = queue->msg_sent_in_package_bit_index[i];
                     if (
                             (packet_index == packet_index_to_check)
                             &&
@@ -584,16 +553,22 @@ main(int argc, char * argv[])
             {
                 if (socket_errno != EWOULDBLOCK)
                 {
-                    coord new_size = Win32GetConsoleSize(&con);
-                    if (new_size.X != con.size.X || new_size.Y != con.size.Y)
+                    coord new_size = GetTerminalSize();
+                    if (new_size.Y != con.size.X || new_size.X != con.size.Y)
                     {
                         ConsoleClear();
                         con.size = new_size;
                         SetScrollMargin(&con, con.margin_top, con.margin_bottom);
                     }
-                    ConsolePrintstatus("Error recvfrom(). %s", GetLastSocketErrorMessage());
+                    //ConsolePrintstatus("Error recvfrom(). %s", GetLastSocketErrorMessage());
+                    ConsoleAppendAt(&con,10,40,"Error recvfrom(): %s", GetLastSocketErrorMessage());
+                    ConsoleAppendAt(&con,11,40,"%s", GetLastSocketErrorMessage());
                     ConsoleClientStatus("Server error");
+#if 0
                     keep_alive = false;
+#else
+                    // do nothing
+#endif
                 }
             }
             else if ( bytes == 0 )
@@ -605,11 +580,13 @@ main(int argc, char * argv[])
 
                 ConsoleClientStatus("Connected");
 
+#if 0
                 unsigned int from_address = 
                     ntohl( from.sin_addr.s_addr );
 
                 unsigned int from_port = 
                     ntohs( from.sin_port );
+#endif
 
                 u32 recv_packet_seq     = recv_datagram.header.seq;
                 u32 recv_packet_ack     = recv_datagram.header.ack;
@@ -664,7 +641,6 @@ main(int argc, char * argv[])
                         i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
                         Assert(delta_local_remote_seq < 32);
 
-                        u32 sync_remote_seq_bit = remote_seq_bit;
                         u32 bit_mask = 0;
                         u32 remote_bit_index = (recv_packet_seq & 31);
 
@@ -762,7 +738,7 @@ main(int argc, char * argv[])
 
         r32 aggr_roundtrips = 0.0f;
         i32 count_pkgs_received = 0;
-        for (i32 i = 0; i < ArrayCount(packet_seq_deltatime); ++i)
+        for (u32 i = 0; i < ArrayCount(packet_seq_deltatime); ++i)
         {
             u32 mask = ((u32)1 << i);
             if ( (packet_seq_bit & mask) ==  mask )
@@ -788,7 +764,7 @@ main(int argc, char * argv[])
         i32 is_critical = 0;
         u32 current_size = 0;
         queue_message * queue = &queue_msg_to_send;
-        for (int i = queue->begin; 
+        for (u32 i = queue->begin; 
                  i != queue->next; 
                  i = ( (++i) & (ArrayCount(queue->messages) - 1)))
         {
@@ -820,12 +796,22 @@ main(int argc, char * argv[])
         packet_seq_realtime[new_package_bit_index] = GetRealTime();
         if (SendPackage(handle,server_addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
         {
-            logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());
-            keep_alive = 0;
+            //logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());
+            //keep_alive = 0;
         }
         else
         {
-            logn("Sending package %i.", packet.header.seq);
+            con.current_line += 1;
+            u32 limit = con.buffer_size.Y - (con.margin_top + con.margin_bottom);
+            if (con.current_line >= limit)
+            {
+                con.current_line = con.margin_top + 1;
+                for (u32 i = con.margin_top; i <= limit;++i)
+                {
+                    ConsoleClearLine(i);
+                }
+            }
+            ConsoleAppendAt(&con, con.current_line,0,"Sending package %i.",  packet.header.seq);
         }
 
         // sleep expected time
@@ -844,13 +830,12 @@ main(int argc, char * argv[])
                 remaining_ms = expected_ms_per_package - time_frame_elapsed;
             }
         }
+
+        ConsoleSwapBuffer(&con);
         ConsoleUpdateMetrics(time_frame_elapsed,avg_roundtrips);
     }
 
-    if (con.vt_enabled)
-    {
-        ConsoleExitAlternateBuffer();
-    }
+    DestroyConsole(&con);
 
     timeEndPeriod(1);
 
