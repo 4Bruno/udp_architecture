@@ -11,6 +11,7 @@
 #define OFFSET_BACK(c,y) (con->back_buffer + (y * (con->buffer_size.X + 1)))
 #define OFFSET_BACK_X(c,y,x) (con->back_buffer + (y * (con->buffer_size.X + 1)) + x)
 
+
 void
 ConsoleDraw(console * con, int at_line,const char * format, ...)
 {
@@ -435,5 +436,23 @@ DestroyConsole(console * con)
     {
         ConsoleExitAlternateBuffer();
         ResetTermios();
+    }
+}
+
+void
+ConsoleIncrCL(console * con, b32 ClearIfBottom = false)
+{
+    con->current_line += 1;
+    u32 limit = con->buffer_size.Y - (con->margin_top + con->margin_bottom);
+    if (con->current_line >= limit)
+    {
+        con->current_line = con->margin_top + 1;
+        if (ClearIfBottom)
+        {
+            for (u32 i = con->margin_top; i <= limit;++i)
+            {
+                ConsoleClearLine(i);
+            }
+        }
     }
 }
