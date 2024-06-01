@@ -1,4 +1,3 @@
-
 /*
  * Watch out:
  * Sequences defines rows as 'y' and columns as 'x'
@@ -7,15 +6,152 @@
 #include "console_sequences.h"
 
 //#include <windows.h>
-#include <wchar.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <fcntl.h>
+#include <termios.h>
+
 
 typedef uint32_t u32;
 
+static struct termios terminal_session_old;
+static struct termios terminal_session_current;
 
+#define CONSOLE_BUFFER_HEIGHT 24
+#define CONSOLE_BUFFER_WIDTH 80
+static char console_back_buffer[CONSOLE_BUFFER_HEIGHT][CONSOLE_BUFFER_WIDTH + 1];
+static char console_front_buffer[CONSOLE_BUFFER_HEIGHT][CONSOLE_BUFFER_WIDTH + 1];
+
+void
+ConsoleDraw(int at_line,const char * format, ...)
+{
+    va_list list;
+    va_start(list, format);
+
+    vsnprintf(console_back_buffer[at_line],CONSOLE_BUFFER_WIDTH + 1, format, list);
+
+    va_end(list);
+}
+
+/* prevents from writing \0 at the end of string */
+void
+ConsoleAppendAt(int at_line, int at_start, const char * format, ...)
+{
+    if (at_start > CONSOLE_BUFFER_WIDTH) return;
+    va_list list;
+    va_start(list, format);
+
+    int err = vsnprintf((console_back_buffer[at_line] + at_start),CONSOLE_BUFFER_WIDTH + 1 - at_start, format, list);
+    if (err > 0)
+    {
+        console_back_buffer[at_line][at_start + err] = ' ';
+    }
+    //memset(console_back_buffer[at_line],'-',at_start);
+
+    va_end(list);
+}
+
+void
+ConsoleAppend(int at_line,const char * format, ...)
+{
+    int ci = 0;
+    for (ci = 0;
+            ci < CONSOLE_BUFFER_WIDTH;
+            ++ci)
+    {
+        if (console_back_buffer[at_line][ci] == '\0')
+            break;
+    }
+
+    if (ci >= CONSOLE_BUFFER_WIDTH) return;
+
+    va_list list;
+    va_start(list, format);
+
+    vsnprintf((console_back_buffer[at_line] + ci),CONSOLE_BUFFER_WIDTH + 1 - ci, format, list);
+
+    va_end(list);
+}
+
+void
+ConsoleClearBuffers()
+{
+    memset(console_back_buffer,' ',CONSOLE_BUFFER_HEIGHT * (CONSOLE_BUFFER_WIDTH + 1));
+    for (int i = 0;
+            i < CONSOLE_BUFFER_HEIGHT;
+            ++i)
+    {
+        console_back_buffer[i][CONSOLE_BUFFER_WIDTH] = '\0';
+    }
+
+    memset(console_front_buffer,' ',CONSOLE_BUFFER_HEIGHT * (CONSOLE_BUFFER_WIDTH + 1));
+    for (int i = 0;
+            i < CONSOLE_BUFFER_HEIGHT;
+            ++i)
+    {
+        console_front_buffer[i][CONSOLE_BUFFER_WIDTH] = '\0';
+    }
+}
+
+void
+ConsoleSwapBuffer()
+{
+    printf("\x1b[H");  // Move cursor to home position
+    for (int y = 0; 
+             y < CONSOLE_BUFFER_HEIGHT; 
+             ++y) 
+    {
+        int mem_cmp = memcmp(console_front_buffer[y], console_back_buffer[y], CONSOLE_BUFFER_WIDTH);
+        if ( mem_cmp != 0 ) 
+        {
+            printf("\x1b[%d;1H%s", y + 1, console_back_buffer[y]);
+            memcpy(console_front_buffer[y], console_back_buffer[y], CONSOLE_BUFFER_WIDTH);
+        }
+    }
+    fflush(stdout);
+}
+
+void initTermios(int echo) 
+{
+  tcgetattr(STDIN_FILENO, &terminal_session_old);
+  terminal_session_current = terminal_session_old;
+  /* disable buffered i/o */
+  terminal_session_current.c_lflag &= ~ICANON; 
+  if (echo) {
+      terminal_session_current.c_lflag |= ECHO; 
+  } else {
+      terminal_session_current.c_lflag &= ~ECHO; 
+  }
+  tcsetattr(STDIN_FILENO, TCSANOW, &terminal_session_current); 
+}
+
+void resetTermios(void) 
+{
+  tcsetattr(STDIN_FILENO, TCSANOW, &terminal_session_old);
+}
+
+char getch() 
+{
+  char ch;
+  //ch = getchar();
+  int result = read(STDIN_FILENO,&ch,1);
+  if (result <= 0)
+      ch = EOF;
+  return ch;
+}
+
+void set_non_blocking_mode() {
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+}
+
+// Function to reset stdin to blocking mode
+void set_blocking_mode() {
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK);
+}
 
 void
 AdvCursor(struct pos pos)
@@ -57,11 +193,11 @@ bool
 ValidateEscResponse()
 {
     bool valid = false;
-    wchar_t wch;
-    wch = _getwch();
+    int wch;
+    wch = getch();
     if (wch == '\x1b')
     {
-        wch = _getwch();
+        wch = getch();
         valid = (wch == '[');
     }
 
@@ -71,12 +207,12 @@ ValidateEscResponse()
 wchar_t
 GetFunctionKey()
 {
-    wchar_t wch;
-    wch = _getwch();
+    int wch;
+    wch = getch();
     {
         if (wch == 0 || wch == 0xE0)
         {
-            wch = _getwch();
+            wch = getch();
         }
     }
 
@@ -87,14 +223,14 @@ int
 ParseResponseInt(char stop_if)
 {
     char buffer[10];
-    wchar_t wch;
+    int wch;
     int size = 0;
-    while ( (wch = _getwch()) && wch != stop_if)
+    while ( (wch = getch()) && wch != stop_if)
     {
         buffer[size++] = wch;
         if (wch == 0 || wch == 0xE0)
         {
-            wch = _getwch();
+            wch = getch();
         }
     }
 
@@ -109,7 +245,7 @@ ParseResponseInt(char stop_if)
 coord
 ConsoleGetCursorP()
 {
-    struct coord coord;
+    struct coord coord = {};
 
     printf(CSI "6n");
 
@@ -287,3 +423,9 @@ ConsoleSetWidth80()
     printf(CSI "?3l");
 }
 
+
+void
+ConsoleScrollUp(int x = 1)
+{
+    printf(CSI "%iS", x);
+}

@@ -1,4 +1,5 @@
 build/
+clients/
 *.vim
 *temp*
 *.py

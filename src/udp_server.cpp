@@ -6,7 +6,6 @@
 #include "protocol.h"
 #include "math.h"
 #include "console_sequences.cpp"
-#include "math.h"
 
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
 
@@ -185,12 +184,12 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
 
         *ptr_client = client;
 
-        logn("New client [%i.%i.%i.%i|%i]",
-                (addr >> 24),
-                (addr >> 16)  & 0xFF,
-                (addr >> 8)   & 0xFF,
-                (addr >> 0)   & 0xFF,
-                port);
+        ConsoleAppendAt(1, 40 , "New client [%i.%i.%i.%i|%i]",
+                                (addr >> 24),
+                                (addr >> 16)  & 0xFF,
+                                (addr >> 8)   & 0xFF,
+                                (addr >> 0)   & 0xFF,
+                                port);
     }
 
     return client;
@@ -211,12 +210,12 @@ RemoveClient(u32 addr, u32 port, struct hash_map * client_map)
 
     (*parent) = (*parent)->next;
 
-    logn("Removing client [%i.%i.%i.%i|%i]",
-            (addr >> 24),
-            (addr >> 16)  & 0xFF,
-            (addr >> 8)   & 0xFF,
-            (addr >> 0)   & 0xFF,
-            port);
+    ConsoleAppendAt(1, 40 ,"Removing client [%i.%i.%i.%i|%i]",
+                            (addr >> 24),
+                            (addr >> 16)  & 0xFF,
+                            (addr >> 8)   & 0xFF,
+                            (addr >> 0)   & 0xFF,
+                            port);
 
     child->addr = 0;
     child->port = 0;
@@ -548,34 +547,6 @@ InitializeTerminateSignalHandler()
 #endif
 }
 
-void
-ConsoleAddMessage(const char * format, ...)
-{
-    if (con.current_line > con.max_lines)
-    {
-        con.current_line = con.max_lines;
-        printf(CSI "1S");
-    }
-
-    va_list list;
-    va_start(list, format);
-
-    int output_after_top_margin = con.current_line + con.margin_top;
-
-    ConsoleClearLine(output_after_top_margin);
-    //MoveCursorAbs(output_after_top_margin, 1);
-
-    char out[255];
-    vsprintf_s(out,ArrayCount(out), format, list);
-
-    va_end(list);
-
-    //vprintf(format, list);
-    printf("%.*s", con.size.X - 1,out);
-
-    con.current_line += 1;
-}
-
 inline package_type
 GetMessageType(message * msg)
 {
@@ -587,6 +558,7 @@ GetMessageType(message * msg)
 int
 main()
 {
+    /* BEGIN TERMINAL */
     InitializeTerminateSignalHandler();
 
     con = CreateVirtualSeqConsole();
@@ -598,11 +570,22 @@ main()
     }
 
     ConsoleAlternateBuffer();
+    MoveCursorAbs(1,1);
     ConsoleClear();
     SetScrollMargin(&con, 4, 2);
-    MoveCursorAbs(1,1);
     ConsoleSetTextFormat(2, Background_Black, Foreground_Green);
+    ConsoleClearBuffers();
+    ConsoleSetWidth80();
 
+    set_non_blocking_mode();
+    initTermios(0);
+
+    ConsoleAppendAt(0,0,"Client List");
+    ConsoleAppendAt(0,40,"Logs");
+
+    /* END TERMINAL */
+
+    /* BEGIN SOCKETS */
     if (!InitializeSockets())
     {
         logn("Error initializing sockets library. %s", GetLastSocketErrorMessage());
@@ -616,6 +599,7 @@ main()
     server_arena.size = 0;
 
     struct server * server = CreateServer(&server_arena, Megabytes(10), Megabytes(50), port);
+    /* END SOCKETS */
 
     // TODO: debug ctrl-c stop server gracefully
     keep_alive = &server->keep_alive;
@@ -640,6 +624,15 @@ main()
         real_time starting_time;
         starting_time = GetRealTime();
 
+
+        char c = getch();
+
+        if (c == 'q')
+        {
+            server->keep_alive = false;
+        }
+
+
         for (int entry_index = 0;
                  entry_index < server->client_map.entries_count;
                  ++entry_index)
@@ -656,10 +649,12 @@ main()
             {
                 if (is_packet_critical)
                 {
-                    ConsoleAddMessage("%s Package was lost! %u (critical?%s)",
-                                        FormatIP(client->addr, client->port).ip ,
-                                        (client->server_packet_seq - 31), 
-                                        is_packet_critical ? "True" : "False");
+                    
+                    ConsoleAppendAt(10,0,
+                                "%s Package was lost! %u (critical?%s)",
+                                FormatIP(client->addr, client->port).ip ,
+                                (client->server_packet_seq - 31), 
+                                is_packet_critical ? "True" : "False");
 
                     queue_message * queue = &client->queue_msg_to_send;
                     struct message * msg = queue->messages + queue->next;
@@ -738,7 +733,7 @@ main()
 
                 if (err == EWOULDBLOCK)
                 {
-                    Sleep(3);
+                    usleep(100000);
                 }
                 else if (err == WSAECONNRESET)
                 {
@@ -934,12 +929,13 @@ main()
                  ++entry_index /* decrement if client removed */)
         {
             struct client_info ** client_entry = (struct client_info **)server->client_map.entries_begin + entry_index;
-            int line = (con.margin_top == 0 ? 1 : con.margin_top) + entry_index;
-            ConsoleClearLine(line);
-            printf("[%i] ptr: %p", entry_index , (void *)*client_entry);
             if (*client_entry)
             {
-                printf("; Client %s", FormatIP((*client_entry)->addr, (*client_entry)->port).ip);
+                int start_line = 1 + entry_index;
+                ConsoleAppendAt(start_line,0,
+                             "[%i] Client %s", 
+                             entry_index,
+                             FormatIP((*client_entry)->addr, (*client_entry)->port).ip);
             }
         }
 #endif
@@ -957,7 +953,6 @@ main()
 
             if (dt_time > 5000)
             {
-                logn("Removing client timeout 10s");
                 RemoveClient(client, &server->client_map);
                 entry_index -= 1;
             }
@@ -1019,20 +1014,22 @@ main()
 
                 if (SendPackage(server->handle,client->addr_ip, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
                 {
-                    logn("Error sending ack package %u. %s", packet.header.seq, GetLastSocketErrorMessage());
+                    //logn("Error sending ack package %u. %s", packet.header.seq, GetLastSocketErrorMessage());
                     server->keep_alive = 0;
                 }
                 
                 client->last_message_from_server = GetRealTime();
             }
         }
+        ConsoleSwapBuffer();
     }
 
     if (con.vt_enabled)
     {
         ConsoleExitAlternateBuffer();
+        fflush(STDIN_FILENO);
+        resetTermios();
     }
-
 
     ShutdownServer(server);
 
