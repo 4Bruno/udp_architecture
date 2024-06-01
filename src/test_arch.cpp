@@ -2,35 +2,9 @@
 #include <stdio.h>
 
 
-bool EnableVTMode()
-{
-    // Set output mode to handle virtual terminal sequences
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hOut == INVALID_HANDLE_VALUE)
-    {
-        return false;
-    }
-
-    DWORD dwMode = 0;
-    if (!GetConsoleMode(hOut, &dwMode))
-    {
-        return false;
-    }
-
-    dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-    if (!SetConsoleMode(hOut, dwMode))
-    {
-        return false;
-    }
-    return true;
-}
-
 int main()
 {
     
-    //EnableVTMode();
-    //
-    //_chdir();
     SetCurrentDirectory(".\\build\\debug\\");
 
     const char * server_exe_name = "udp_server.exe";
@@ -50,11 +24,7 @@ int main()
 
     Sleep(1000);
 
-<<<<<<< HEAD
-    const int total_clients = 1;
-=======
     const int total_clients = 6;
->>>>>>> server_cross_platform
     PROCESS_INFORMATION client_pi[total_clients];
     for (int client_index = 0; client_index < total_clients; ++client_index)
     {
