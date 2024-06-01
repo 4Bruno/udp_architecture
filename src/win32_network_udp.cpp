@@ -58,17 +58,24 @@ GET_LAST_SOCKET_ERROR_MESSAGE(GetLastSocketErrorMessage)
     DWORD err_no = GetLastError();
     LPTSTR Error = 0;
 
-    logn("System error code %lu",err_no);
+    //logn("System error code %lu",err_no);
 
-    if(FormatMessage(  FORMAT_MESSAGE_FROM_SYSTEM,
+    int no_chars = FormatMessage(  FORMAT_MESSAGE_FROM_SYSTEM,
                 NULL,
                 err_no,
                 0,
                 err_msg,
                 sizeof(g_socket_library_formatted_internal_error_buffer),
-                NULL) == 0)
+                NULL);
+
+    if(no_chars == 0)
     {
         err_msg = (char *)g_socket_library_formatted_internal_error_buffer_issue;
+    }
+    else
+    {
+        // ignore \r\n
+        err_msg[no_chars - 2] = 0;
     }
 
     return (const char *)err_msg;

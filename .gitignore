@@ -1,4 +1,8 @@
 build/
+clients/
 *.vim
 *temp*
 *.py
+
+client.bat
+server.bat

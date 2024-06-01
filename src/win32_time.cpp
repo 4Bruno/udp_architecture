@@ -28,7 +28,7 @@ GetTimeDiff(real_time TimeEnd,real_time TimeStart,real_time ClockFreq)
     time.QuadPart *= 1000000; // microseconds 10^-6
     time.QuadPart /= ClockFreq.QuadPart;
 
-    delta_time time_diff = time.QuadPart * (1.0f / 1000.0f);
+    delta_time time_diff = (r32)((r64)time.QuadPart * (1.0 / 1000.0));
 
     return time_diff;
 }

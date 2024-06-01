@@ -19,6 +19,8 @@
 #include <string.h>
 #include "atomic.h"
 #include "protocol.h"
+#include "console_sequences.cpp"
+#include "math.h"
 
 #pragma comment( lib, "Winmm.lib" )
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
@@ -39,12 +41,6 @@ struct package_info
     i32 ack;
 };
 
-struct package_queue
-{
-#define PACKAGES_PER_SECOND 32 
-    int head;
-    struct package_info packages[PACKAGES_PER_SECOND];
-};
 
 inline i32
 IsSeqGreaterThan(u32 a, u32 b)
@@ -103,6 +99,57 @@ InitializeTerminateSignalHandler()
 #endif
 }
 
+void 
+printBits(size_t const size, void const * const ptr)
+{
+    unsigned char *b = (unsigned char*) ptr;
+    unsigned char byte;
+    size_t i, j;
+    
+    for (i = size-1; i >= 0; i--) {
+        for (j = 7; j >= 0; j--) {
+            byte = (b[i] >> j) & 1;
+            printf("%u", byte);
+        }
+    }
+    puts("");
+}
+
+u32
+IPToU32(const char * ip_s)
+{
+    u32 ip_addr = 0;
+    u32 lshift = 24;
+    u32 range_ip = 0;
+    u32 inv_max_ip = (~(u32)255);
+    const char * err_msg = "Error parsing ip address. Expected format (nnn.xxx.yyy.zzz). Values between 0-255";
+
+    u32 len = (u32)strlen(ip_s);
+    for (char * c = (char *)ip_s; *c != 0; ++c)
+    {
+        u32 range_ip = strtoul(c, &c, 10); // will move to next '.' or \0
+
+        if ( (range_ip & inv_max_ip) > 0)
+        {
+            logn("%s", err_msg);
+            return 0;
+        }
+
+        if ( *c != '.' && *c != 0)
+        {
+            logn("%s", err_msg);
+            return 0;
+        }
+
+        ip_addr = ip_addr | (range_ip << lshift);
+        lshift -= 8;
+
+        if (*c == 0) break;
+    }
+
+    return ip_addr;
+}
+
 u32
 GetEnvIPAddr()
 {
@@ -111,23 +158,17 @@ GetEnvIPAddr()
     char ip_s[255];
     size_t len = 0;
 
+
     if (getenv_s(&len, &ip_s[0], sizeof(ip_s),"aws_ip") == 0)
     {
         if (len == 0)
         {
+            logn("Missing aws_ip env var, using localhost");
             ip_addr = IP_ADDR( 127, 0 , 0 , 1);
         }
         else
         {
-            char * start_c = (char *)ip_s;
-            u32 shift = 24;
-            u32 range_ip = 0;
-            while ((start_c < (ip_s + len)) && (range_ip = strtoul(start_c, &start_c, 10)))
-            {
-                ip_addr = ip_addr | (range_ip << shift);
-                shift -= 8;
-                start_c += 1; // skip .
-            }
+            ip_addr = IPToU32(ip_s);
         }
     }
     else
@@ -139,57 +180,231 @@ GetEnvIPAddr()
     return ip_addr;
 }
 
-void 
-printBits(size_t const size, void const * const ptr)
+inline package_type
+GetMessageType(message * msg)
 {
-    unsigned char *b = (unsigned char*) ptr;
-    unsigned char byte;
-    int i, j;
-    
-    for (i = size-1; i >= 0; i--) {
-        for (j = 7; j >= 0; j--) {
-            byte = (b[i] >> j) & 1;
-            printf("%u", byte);
-        }
+    package_type result = (package_type)((int)msg->header.message_type & ~(1 << 7));
+
+    return result;
+}
+
+i32
+IsCriticalMessage(message * msg)
+{
+    i32 is_critical = 
+        (msg->header.message_type & (1 << 7)) == (1 << 7);
+
+    return is_critical;
+}
+
+b32
+IsAckMessage(const u32 * packet_seq_bit, queue_message * queue, i32 index)
+{
+    i32 pck_bit_index = queue->msg_sent_in_package_bit_index[index];
+    i32 bit_mask = ((u32)1 << pck_bit_index);
+
+    i32 is_ack_msg = (*packet_seq_bit & bit_mask) == bit_mask;
+
+    return is_ack_msg;
+}
+
+struct message *
+GetNextAvailableMessageInQueue(struct queue_message * queue, const u32 * packet_seq_bit)
+{
+    struct message * msg = 0;
+    b32 MessageIsAck = 0;
+
+    i32 index = (queue->next++ & (ArrayCount(queue->messages) - 1));
+
+    // this may happen if all packages are critical and none is ack
+    Assert(queue->next != queue->begin);
+
+    msg = queue->messages + index;
+    MessageIsAck = IsAckMessage(packet_seq_bit, queue, index);
+
+    if (IsCriticalMessage(msg) && !MessageIsAck)
+    {
+        struct message * first_ack_msg = 0;
+        i32 index = queue->next;
+        do
+        {
+            first_ack_msg = queue->messages + index;
+            if (IsAckMessage(packet_seq_bit, queue, index))
+            {
+                memcpy(first_ack_msg, msg, sizeof(struct message));
+                msg->header.message_type = 0;
+                break;
+            }
+            index = (index + 1) & (ArrayCount(queue->messages) - 1);
+        } while (index != queue->begin);
+
+        Assert(index != queue->begin);
     }
-    puts("");
+
+    Assert(!IsCriticalMessage(msg) || MessageIsAck);
+
+    return msg;
 }
 
 void
-CreatePackages(struct queue_message * queue, i32 packet_type, void * data, u32 size)
+CreatePackages(const u32 * packet_seq_bit, struct queue_message * queue, enum package_type packet_type, const void * data, u32 size, b32 is_critical)
 {
     i32 order = 0;
     i32 id = (queue->last_id++ & ((1 << 8) - 1));
+    u8 critical_mask = ((u8)(is_critical ? 1 : 0) << 7);
+
+    // create a header package so peer knows needs to create buffer
+    if (size > ArrayCount(queue->messages[0].data))
+    {
+        struct message * msg = GetNextAvailableMessageInQueue(queue, packet_seq_bit);
+        msg->header.id = id;
+        msg->header.order = order;
+        msg->header.message_type = package_type_buffer | critical_mask;
+        msg->header.len = sizeof(struct udp_buffer);
+
+        udp_buffer buffer_msg = { size };
+        memcpy(msg->data, &buffer_msg, sizeof(udp_buffer) );
+
+        order += 1;
+    }
 
     while (size > 0)
     {
         u32 used_size = min(size, sizeof(queue->messages[0].data));
 
-        Assert(
-                ((queue->next + 1) & (ArrayCount(queue->messages) - 1)) !=
-                (queue->begin & (ArrayCount(queue->messages) - 1))
-              );
+        struct message * msg = GetNextAvailableMessageInQueue(queue, packet_seq_bit);
 
+        msg->header.id = id;
+        msg->header.order = order;
+        msg->header.message_type = packet_type | critical_mask;
+        msg->header.len = used_size;
 
-        struct message * pck = 
-            queue->messages + (queue->next++ & (ArrayCount(queue->messages) - 1));
-
-        pck->header.id = id;
-        pck->header.order = order;
-        pck->header.message_type = packet_type;
-        pck->header.len = used_size;
-
-        memcpy(pck->data, data, used_size);
+        memcpy(msg->data, data, used_size);
 
         size -= used_size;
         order += 1;
     }
 }
 
+coord
+Win32GetConsoleSize(struct console * con)
+{
+    CONSOLE_SCREEN_BUFFER_INFO ScreenBufferInfo;
+    GetConsoleScreenBufferInfo(con->handle_out, &ScreenBufferInfo);
+
+    coord Size;
+    Size.X = ScreenBufferInfo.srWindow.Right - ScreenBufferInfo.srWindow.Left + 1;
+    Size.Y = ScreenBufferInfo.srWindow.Bottom - ScreenBufferInfo.srWindow.Top + 1;
+
+    return Size;
+}
+
+struct console con;
+
+void
+ConsoleAddMessage(const char * format, ...)
+{
+    if (con.current_line > con.max_lines)
+    {
+        con.current_line = con.max_lines;
+        printf(CSI "1S");
+    }
+
+    va_list list;
+    va_start(list, format);
+
+    int output_after_top_margin = con.current_line + con.margin_top;
+
+    ConsoleClearLine(output_after_top_margin);
+    //MoveCursorAbs(output_after_top_margin, 1);
+
+    char out[255];
+    vsprintf_s(out, format, list);
+
+    va_end(list);
+
+    //vprintf(format, list);
+    printf("%.*s", con.size.X - 1,out);
+
+    con.current_line = ++con.current_line;
+}
+
+void
+ConsolePrintstatus(const char * format, ...)
+{
+    va_list list;
+    va_start(list, format);
+
+    char out[255];
+    vsprintf_s(out, ArrayCount(out), format, list);
+
+    ConsoleClearLine(con.size.Y);
+    printf("%.*s", con.size.X - 1 , out);
+
+    va_end(list);
+
+}
+
+
+void
+ConsoleUpdateMetrics(r32 time_frame_elapsed, r32 avg_package_roundtrip)
+{
+    i32 metrics_line = 3;
+    ConsoleSaveCursor();
+    MoveCursorAbs(metrics_line, 1);
+    ConsoleClearLine(metrics_line);
+    printf("fps: %3.1f, roundtrip: %3.1f",time_frame_elapsed,avg_package_roundtrip);
+    ConsoleRestoreCursor();
+}
+
+void
+ConsoleClientStatus(const char * s)
+{
+    const char * msg = "connection status: ";
+    const int max_len = con.size.X;
+    const int remaining_space = max_len - 19 /* size msg */;
+    int start_col = 1;
+    ConsoleSaveCursor();
+    MoveCursorAbs(1, start_col);
+    ConsoleClearLine(1);
+    printf("%s%*.*s",msg,remaining_space,remaining_space,s);
+    ConsoleRestoreCursor();
+}
+
+struct format_ip
+{
+    char ip[12 + 3 + 5 + 3 + 1];
+};
+
+format_ip
+FormatIP(u32 addr, u32 port)
+{ 
+    struct format_ip format_ip;
+    sprintf_s(format_ip.ip, "[%3i.%3i.%3i.%3i|%5.5i]", 
+            (addr >> 24), (addr >> 16)  & 0xFF, (addr >> 8)   & 0xFF, (addr >> 0)   & 0xFF,
+            port);
+
+    return format_ip;
+}
+
 int
 main(int argc, char * argv[])
 {
     InitializeTerminateSignalHandler();
+
+    con = Win32CreateVTConsole();
+    
+    if (!con.vt_enabled)
+    {
+        logn("Couldn't initialize console virtual seq");
+        return - 1;
+    }
+
+    ConsoleAlternateBuffer();
+    ConsoleClear();
+    SetScrollMargin(&con, 4, 2);
+    MoveCursorAbs(1,1);
+    ConsoleSetTextFormat(2, Background_Black, Foreground_Green);
 
     if (!InitializeSockets())
     {
@@ -199,21 +414,37 @@ main(int argc, char * argv[])
     socket_handle handle = 0;
     int port = 30000;
 
+#if 1
+    u32 ip_addr = GetEnvIPAddr();
+
     if (argc > 1)
     {
-        char * arg_port = argv[1];
-        port = atoi(arg_port);
+        ip_addr = IPToU32(argv[1]);
     }
 
-#if 1
-    u32 ip_addr = IP_ADDR( 127, 0 , 0 , 1);
 #else
-    if (_putenv_s("aws_ip","3.70.5.224") != 0)
+    if (_putenv_s("aws_ip","3.71.25.249") != 0)
     {
         logn("Couldn't set env variable for ip addr");
     }
     u32 ip_addr = GetEnvIPAddr();
 #endif
+
+    int start_col = 1;
+    int max_len = con.size.X - 11;
+    MoveCursorAbs(2, start_col);
+    printf("%s %*.*s", "Server IP:", max_len ,max_len, FormatIP(ip_addr, port).ip);
+
+#if 0
+    logn("Attemp connection to client [%i.%i.%i.%i|%i]",
+            (ip_addr >> 24),
+            (ip_addr >> 16)  & 0xFF,
+            (ip_addr >> 8)   & 0xFF,
+            (ip_addr >> 0)   & 0xFF,
+            port);
+#endif
+
+    ConsoleClientStatus("Disconnected");
 
     // server port
     sockaddr_in server_addr = CreateSocketAddress( ip_addr, port);
@@ -229,6 +460,14 @@ main(int argc, char * argv[])
     u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
     u32 remote_seq = UINT_MAX;
     u32 remote_seq_bit = ~0;
+    real_time packet_seq_realtime[32];
+    delta_time packet_seq_deltatime[32];
+    for (i32 i = 0; i < ArrayCount(packet_seq_realtime); ++i)
+    {
+        ZeroTime(packet_seq_realtime[i]);
+        packet_seq_deltatime[i] = 0.0f;
+    }
+    u32 packet_seq_critical = 0;
 #else
     u32 packet_seq = UINT_MAX - 640;
     u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
@@ -236,12 +475,14 @@ main(int argc, char * argv[])
     u32 remote_seq_bit = ~0;
 #endif
 
-    package_queue packages_received_ring = {};
-    packages_received_ring.head = 0;
-
     real_time perf_freq = GetClockResolution();
 
+<<<<<<< HEAD
 #if 0
+=======
+#define PACKAGES_PER_SECOND 32
+
+>>>>>>> server_cross_platform
     u32 packages_per_second = PACKAGES_PER_SECOND;
 #else
     u32 packages_per_second = 10;
@@ -251,35 +492,83 @@ main(int argc, char * argv[])
     // Sleep will do granular scheduling up to 1ms
     timeBeginPeriod(1);
 
-    logn("Start sending msg to server (rate speed %i packages per second)",PACKAGES_PER_SECOND);
+    ConsolePrintstatus("Start sending msg to server (rate speed %i packages per second)",PACKAGES_PER_SECOND);
 
     client_status my_status_with_server = client_status_none;
 
     queue_message queue_msg_to_send;
     memset(&queue_msg_to_send, 0, sizeof(queue_message));
+    for (int i  = 0; i < ArrayCount(queue_msg_to_send.msg_sent_in_package_bit_index); ++i)
+    {
+        queue_msg_to_send.msg_sent_in_package_bit_index[i] = 32;
+    }
 
     while ( keep_alive )
     {
-        real_time starting_time, ending_time, delta_ms;
+        real_time starting_time;
 
         starting_time = GetRealTime();
 
         i32 any_pkc_sent = 0;
 
-        u32 bit_to_check = (1 << ((packet_seq + 1) & (32 - 1)));
-        i32 is_packet_ack = (packet_seq_bit & bit_to_check) == bit_to_check;
+        u32 packet_index_to_check = (packet_seq + 1) & (32 - 1);
+        u32 packet_bit_index_to_check = (1 << packet_index_to_check);
+        i32 is_packet_ack = (packet_seq_bit & packet_bit_index_to_check) == packet_bit_index_to_check;
+        i32 is_packet_critical = (packet_seq_critical & packet_bit_index_to_check) == packet_bit_index_to_check;
 
         if (!is_packet_ack)
         {
-            logn("Package was lost! %u", (packet_seq - 31));
-            // TODO:
-            // is this a critical package? - issue 
+            ConsoleAddMessage("Package was lost! %u (critical?%s)", (packet_seq - 31), is_packet_critical ? "True" : "False");
+            if (is_packet_critical)
+            {
+                queue_message * queue = &queue_msg_to_send;
+                struct message * msg = queue->messages + queue->next;
+                i32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
+
+                Assert(BetweenIn(packet_index,0,32));
+
+                if (
+                        (packet_index == packet_index_to_check)
+                        &&
+                        IsCriticalMessage(msg)
+                    )
+                {
+                    // msg at next index needs to be re-sent. simply adv pointer
+                    queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
+                }
+
+                int next_index = (queue->next == queue->begin) ? queue->next + 1 : queue->next;
+                next_index &= (ArrayCount(queue->messages) - 1);
+
+                // corner case begin == next
+                for (int i = next_index; 
+                         i != queue->begin; 
+                         i = ( (++i) & (ArrayCount(queue->messages) - 1)))
+                {
+                    struct message * msg = queue->messages + i;
+                    i32 packet_index = queue->msg_sent_in_package_bit_index[i];
+                    if (
+                            (packet_index == packet_index_to_check)
+                            &&
+                            IsCriticalMessage(msg)
+                        )
+                    {
+                        // we need to send it again. swap if necessary and incr next
+                        if (queue->next != i)
+                        {
+                            struct message * next_msg = (queue->messages + queue->next);
+                            memcpy(next_msg,msg, sizeof(struct message));
+                            memset(msg, 0, sizeof(struct message));
+                        }
+                        queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
+                    }
+                }
+
+            }
         }
 
 
         {
-            int recv_status = -1;
-
             struct packet recv_datagram;
             u32 max_packet_size = sizeof( struct packet);
 
@@ -295,16 +584,27 @@ main(int argc, char * argv[])
             {
                 if (socket_errno != EWOULDBLOCK)
                 {
-                    logn("Error recvfrom(). %s", GetLastSocketErrorMessage());
+                    coord new_size = Win32GetConsoleSize(&con);
+                    if (new_size.X != con.size.X || new_size.Y != con.size.Y)
+                    {
+                        ConsoleClear();
+                        con.size = new_size;
+                        SetScrollMargin(&con, con.margin_top, con.margin_bottom);
+                    }
+                    ConsolePrintstatus("Error recvfrom(). %s", GetLastSocketErrorMessage());
+                    ConsoleClientStatus("Server error");
+                    keep_alive = false;
                 }
             }
             else if ( bytes == 0 )
             {
                 logn("No more data. Closing.");
-                recv_status = 0;
             }
             else
             {
+
+                ConsoleClientStatus("Connected");
+
                 unsigned int from_address = 
                     ntohl( from.sin_addr.s_addr );
 
@@ -318,88 +618,105 @@ main(int argc, char * argv[])
                 Assert( (packet_seq == recv_packet_ack) || IsSeqGreaterThan(packet_seq, recv_packet_ack));
 
                 struct message * messages[8];
-                u32 msg_count = recv_datagram.header.messages;
+                i32 msg_count = recv_datagram.header.messages;
                 // datagram with 492b max payload can have at most
                 // 7.6 messages given that each msg has 32b header + 32b data
                 Assert(recv_datagram.header.messages <= sizeof(messages));
 
+                i32 inc_package_has_any_critical_msg = 0;
                 u32 begin_data_offset = 0;
-                for (int msg_index = 0;
+                for (i32 msg_index = 0;
                         msg_index < msg_count;
                         ++msg_index)
                 {
                     struct message ** msg = messages + msg_index;
                     *msg = (struct message *)recv_datagram.data + begin_data_offset;
+                    inc_package_has_any_critical_msg = 
+                        inc_package_has_any_critical_msg || IsCriticalMessage(*msg);
+
+                    // strip critical flag
+                    (*msg)->header.message_type = GetMessageType(*msg);
+
                     begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
                 }
+
 #if 0
-                logn("[%i.%i.%i.%i] Message (%i) received %s", 
-                        (from_address >> 24),
-                        (from_address >> 16)  & 0xFF0000,
-                        (from_address >> 8)   & 0xFF00,
-                        (from_address >> 0)   & 0xFF,
-                        recv_datagram.seq, recv_datagram.msg); 
-#endif
-                recv_status = fromLength;
+                if (inc_package_has_any_critical_msg)
                 {
+                    ConsoleAddMessage("Critical msg from server");
+                }
+#endif
 
-#if 0
-                    // TODO: what if we lose all packages for 1 > s?
-                    // should we simply reset to 0 all bits and move on
-                    // TEST THIS
-                    i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
-                    Assert(delta_local_remote_seq < 32);
-                    if (delta_local_remote_seq < 32)
+                // debug lose all critical
+                inc_package_has_any_critical_msg = 0;
+                if (!inc_package_has_any_critical_msg)
+                {
                     {
-                        if (IsSeqGreaterThan(recv_packet_seq,remote_seq))
+                        /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
+                        // unless crafted package, recv package should always be higher than our record
+                        Assert(IsSeqGreaterThan(recv_packet_seq,remote_seq));
+
+                        // TODO: what if we lose all packages for 1 > s?
+                        // should we simply reset to 0 all bits and move on
+                        // TEST THIS
+                        // int on purpose check abs (to look at no branching method)
+                        // https://graphics.stanford.edu/~seander/bithacks.html#IntegerAbs
+                        i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
+                        Assert(delta_local_remote_seq < 32);
+
+                        u32 sync_remote_seq_bit = remote_seq_bit;
+                        u32 bit_mask = 0;
+                        u32 remote_bit_index = (recv_packet_seq & 31);
+
+                        if (delta_local_remote_seq < 32)
                         {
-                            Assert(IsSeqGreaterThan(recv_packet_seq, remote_seq));
+                            u32 local_bit_index = (remote_seq & 31);
 
-                            u32 remote_bit_index = ((remote_seq + 1) & 31);
-                            u32 packet_seq_index = (recv_packet_seq & 31);
+                            u32 lo = min(remote_bit_index, local_bit_index);
+                            u32 hi = max(remote_bit_index, local_bit_index);
+                            u32 max_minus_hi = (31 - hi);
 
-                            u32 bit_mask = ~(((u32)~0 << (remote_bit_index + (31 - packet_seq_index))) >> (31 - packet_seq_index));
-                            remote_seq_bit = remote_seq_bit & bit_mask;
-                            remote_seq_bit = remote_seq_bit | (1 << packet_seq_index);
+                            bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+
+                            //     hi        low 
+                            //      v         v
+                            // 00000111111111110000
+                            if (remote_bit_index >= local_bit_index)
+                            {
+                                //     hi        low 
+                                //      v         v
+                                // 11111000000000001111
+                                bit_mask = ~bit_mask; 
+                            }
+
+                            bit_mask = bit_mask ^ ((u32)1 << lo);
                         }
-                        else
-                        {
-                            remote_seq_bit = remote_seq_bit | (1 << (recv_packet_seq & 31));
-                        }
 
+                        remote_seq_bit = (remote_seq_bit & bit_mask) | ((u32)1 << remote_bit_index);
                         remote_seq = recv_packet_seq;
                     }
-#endif
-                    /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
-                    // unless crafted package, recv package should always be higher than our record
-                    Assert(IsSeqGreaterThan(recv_packet_seq,remote_seq));
 
-                    // TODO: what if we lose all packages for 1 > s?
-                    // should we simply reset to 0 all bits and move on
-                    // TEST THIS
-                    // int on purpose check abs (to look at no branching method)
-                    // https://graphics.stanford.edu/~seander/bithacks.html#IntegerAbs
-                    i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
-                    Assert(delta_local_remote_seq < 32);
+                    /* UPDATE OUR BIT ARRAY OF PACKAGES SENT CONFIRMED BY PEER */
 
-                    u32 sync_remote_seq_bit = remote_seq_bit;
+                    u32 delta_seq_and_ack = (packet_seq - recv_packet_ack);
                     u32 bit_mask = 0;
-                    u32 remote_bit_index = (recv_packet_seq & 31);
 
-                    if (delta_local_remote_seq < 32)
+                    // TODO: peer is ack packages 1 s old, should we issue a sync flag?
+                    if (delta_seq_and_ack <= 31)
                     {
-                        u32 local_bit_index = (remote_seq & 31);
+                        u32 remote_bit_index = (recv_packet_ack & 31);
+                        u32 local_bit_index = (packet_seq & 31);
 
                         u32 lo = min(remote_bit_index, local_bit_index);
                         u32 hi = max(remote_bit_index, local_bit_index);
                         u32 max_minus_hi = (31 - hi);
 
-                        u32 bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+                        bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
 
                         //     hi        low 
                         //      v         v
                         // 00000111111111110000
-                        if (remote_bit_index >= local_bit_index)
+                        if (local_bit_index >= remote_bit_index)
                         {
                             //     hi        low 
                             //      v         v
@@ -408,44 +725,11 @@ main(int argc, char * argv[])
                         }
 
                         bit_mask = bit_mask ^ ((u32)1 << lo);
+                        packet_seq_deltatime[remote_bit_index] = GetTimeDiff(GetRealTime(), packet_seq_realtime[remote_bit_index], perf_freq);
                     }
 
-                    remote_seq_bit = (remote_seq_bit & bit_mask) | ((u32)1 << remote_bit_index);
-                    remote_seq = recv_packet_seq;
+                    packet_seq_bit = (recv_packet_ack_bit & bit_mask);
                 }
-
-                /* UPDATE OUR BIT ARRAY OF PACKAGES SENT CONFIRMED BY PEER */
-
-                u32 delta_seq_and_ack = (packet_seq - recv_packet_ack);
-                u32 bit_mask = 0;
-
-                // TODO: peer is ack packages 1 s old, should we issue a sync flag?
-                if (delta_seq_and_ack <= 31)
-                {
-                    u32 remote_bit_index = (recv_packet_ack & 31);
-                    u32 local_bit_index = (packet_seq & 31);
-
-                    u32 lo = min(remote_bit_index, local_bit_index);
-                    u32 hi = max(remote_bit_index, local_bit_index);
-                    u32 max_minus_hi = (31 - hi);
-
-                    bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
-
-                    //     hi        low 
-                    //      v         v
-                    // 00000111111111110000
-                    if (local_bit_index >= remote_bit_index)
-                    {
-                        //     hi        low 
-                        //      v         v
-                        // 11111000000000001111
-                        bit_mask = ~bit_mask; 
-                    }
-
-                    bit_mask = bit_mask ^ ((u32)1 << lo);
-                }
-
-                packet_seq_bit = (recv_packet_ack_bit & bit_mask);
             }
         }
 
@@ -463,12 +747,12 @@ main(int argc, char * argv[])
             case client_status_none:
             {
                 struct udp_auth login_data;
-                sprintf(login_data.user,"%s","anonymous");
-                sprintf(login_data.pwd,"%s","1234");
+                sprintf_s(login_data.user,"%s","anonymous");
+                sprintf_s(login_data.pwd,"%s","1234");
 
                 my_status_with_server = client_status_trying_auth;
 
-                CreatePackages(&queue_msg_to_send, package_type_auth, (void *)&login_data, sizeof(udp_auth));
+                CreatePackages(&packet_seq_bit,&queue_msg_to_send, package_type_auth, (const void *)&login_data, sizeof(udp_auth), true);
 
             } break;
             default:
@@ -476,10 +760,23 @@ main(int argc, char * argv[])
             } break;
         }
 
+        r32 aggr_roundtrips = 0.0f;
+        i32 count_pkgs_received = 0;
+        for (i32 i = 0; i < ArrayCount(packet_seq_deltatime); ++i)
+        {
+            u32 mask = ((u32)1 << i);
+            if ( (packet_seq_bit & mask) ==  mask )
+            {
+                aggr_roundtrips += packet_seq_deltatime[i];
+                count_pkgs_received += 1;
+            }
+        }
+        r32 avg_roundtrips = aggr_roundtrips / (r32)(max(count_pkgs_received, 1));
 
         // set current seq as not received
         packet_seq += 1;
-        packet_seq_bit = (packet_seq_bit & ~(1 << (packet_seq & 31)));
+        u32 new_package_bit_index = (packet_seq & 31);
+        packet_seq_bit = (packet_seq_bit & ~((u32)1 << new_package_bit_index));
 
         struct packet packet;
         packet.header.seq       = packet_seq;
@@ -488,25 +785,39 @@ main(int argc, char * argv[])
         packet.header.protocol  = PROTOCOL_ID;
         packet.header.messages  = 0;
 
+        i32 is_critical = 0;
         u32 current_size = 0;
         queue_message * queue = &queue_msg_to_send;
         for (int i = queue->begin; 
                  i != queue->next; 
-                 i = (++i & (ArrayCount(queue->messages) - 1)))
+                 i = ( (++i) & (ArrayCount(queue->messages) - 1)))
         {
             struct message * msg = queue->messages + i;
-            u32 size = msg ->header.len + sizeof(message_header);
-            memcpy(packet.data + current_size, msg, size);
+            u32 msg_size = msg ->header.len + sizeof(message_header);
+            u32 size_after_msg = (current_size + msg_size);
 
-            current_size += size;
-            queue->begin += 1;
-            packet.header.messages += 1;
-            if (current_size >= sizeof(packet.data))
+            if ( size_after_msg <= sizeof(packet.data) )
             {
-                break;
+                memcpy(packet.data + current_size, msg, msg_size);
+
+                is_critical = is_critical | IsCriticalMessage(msg);
+
+                // keep track in which pck was sent
+                queue->msg_sent_in_package_bit_index[i] = new_package_bit_index;
+
+                current_size = size_after_msg;
+                queue->begin = (++queue->begin) & (ArrayCount(queue->messages) - 1);
+                packet.header.messages += 1;
+                if (current_size >= sizeof(packet.data))
+                {
+                    break;
+                }
             }
         }
 
+        packet_seq_critical = (packet_seq_critical & (~((u32)1 << new_package_bit_index)));
+        packet_seq_critical = packet_seq_critical | ( (is_critical ? 1 : 0) << new_package_bit_index );
+        packet_seq_realtime[new_package_bit_index] = GetRealTime();
         if (SendPackage(handle,server_addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
         {
             logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());
@@ -517,20 +828,10 @@ main(int argc, char * argv[])
             logn("Sending package %i.", packet.header.seq);
         }
 
-        //Assert(packet.seq != 34);
-
-        // I increase array block asap 
-        // there is lag between the last packages so pck 62/63 shows a not received
-        // because is already pointing to the next block
-        //printf("Sent: %10.10u\t",packet_seq - 1);printBits(sizeof(u32),&packet_seq_bit);
-        //printf("Recv: %10.10u\t",remote_seq);printBits(sizeof(u32),&remote_seq_bit);
-
         // sleep expected time
         delta_time time_frame_elapsed = 
             GetTimeDiff(GetRealTime(), starting_time, perf_freq);
         r32 remaining_ms = expected_ms_per_package - time_frame_elapsed;
-
-        //logn("Time frame remaining %f\n",remaining_ms);
 
         if (remaining_ms > 1.0f)
         {
@@ -543,6 +844,12 @@ main(int argc, char * argv[])
                 remaining_ms = expected_ms_per_package - time_frame_elapsed;
             }
         }
+        ConsoleUpdateMetrics(time_frame_elapsed,avg_roundtrips);
+    }
+
+    if (con.vt_enabled)
+    {
+        ConsoleExitAlternateBuffer();
     }
 
     timeEndPeriod(1);
