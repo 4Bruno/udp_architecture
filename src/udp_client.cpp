@@ -347,6 +347,7 @@ FormatIP(u32 addr, u32 port)
     return format_ip;
 }
 
+
 int
 main(int argc, char * argv[])
 {
@@ -488,6 +489,8 @@ main(int argc, char * argv[])
         if (!is_packet_ack)
         {
             //ConsoleAddMessage("Package was lost! %u (critical?%s)", (packet_seq - 31), is_packet_critical ? "True" : "False");
+            ConsoleIncrCL(&con, true);
+            ConsoleAppendAt(&con, con.current_line,0,"Package was lost! %u (critical?%s)", (packet_seq - 31), is_packet_critical ? "True" : "False");
             if (is_packet_critical)
             {
                 queue_message * queue = &queue_msg_to_send;
@@ -801,17 +804,10 @@ main(int argc, char * argv[])
         }
         else
         {
-            con.current_line += 1;
-            u32 limit = con.buffer_size.Y - (con.margin_top + con.margin_bottom);
-            if (con.current_line >= limit)
-            {
-                con.current_line = con.margin_top + 1;
-                for (u32 i = con.margin_top; i <= limit;++i)
-                {
-                    ConsoleClearLine(i);
-                }
-            }
+#if 0
+            ConsoleIncrCL(&con, true);
             ConsoleAppendAt(&con, con.current_line,0,"Sending package %i.",  packet.header.seq);
+#endif
         }
 
         // sleep expected time
@@ -831,8 +827,17 @@ main(int argc, char * argv[])
             }
         }
 
-        ConsoleSwapBuffer(&con);
+        ConsoleAppendAt(&con, 6, 40, "Last: %u",packet_seq);
+        for (i32 i = 31; i >= 0; --i)
+        {
+            b32 is_set = (packet_seq_bit >> i) & 0x01;
+            ConsoleAppendAt(&con, 7, 40 + 31 - i, "%c",is_set ? 'A' : '-');
+        }
+        //remote_seq = UINT_MAX;
+        //remote_seq_bit = ~0;
+
         ConsoleUpdateMetrics(time_frame_elapsed,avg_roundtrips);
+        ConsoleSwapBuffer(&con);
     }
 
     DestroyConsole(&con);
