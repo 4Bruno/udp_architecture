@@ -20,9 +20,6 @@
 #include <fcntl.h>
 #include <termios.h>
 
-static struct termios terminal_session_old;
-static struct termios terminal_session_current;
-
 
 /* ---------------- UNKNOWN ---------------- */
 #else

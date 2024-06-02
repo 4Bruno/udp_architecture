@@ -1048,7 +1048,7 @@ main()
             remaining_ms = expected_ms_per_package - time_frame_elapsed;
             while (remaining_ms > 1.0f)
             {
-                Sleep((DWORD)remaining_ms);
+                msleep(remaining_ms);
                 time_frame_elapsed = GetTimeDiff(GetRealTime(), starting_time, clock_freq);
                 remaining_ms = expected_ms_per_package - time_frame_elapsed;
             }

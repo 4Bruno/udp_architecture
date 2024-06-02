@@ -2,6 +2,10 @@
 #include <stdio.h>
 #include <sys/ioctl.h>
 
+
+static struct termios terminal_session_old;
+static struct termios terminal_session_current;
+
 coord
 GetConsoleSize()
 {
@@ -25,8 +29,6 @@ CREATE_VIRTUAL_SEQ_CONSOLE(CreateVirtualSeqConsole)
     con->size = GetConsoleSize();
     con->max_lines = con->size.Y;
     con->vt_enabled = true;
-
-    return con;
 }
 
 INIT_TERMIOS(InitTermios)
@@ -56,6 +58,7 @@ STDIN_SET_NON_BLOCKING(StdinSetNonBlocking)
 
 // Function to reset stdin to blocking mode
 STDIN_SET_BLOCKING(StdinSetBlocking)
+{
     int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
     fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK);
 }
