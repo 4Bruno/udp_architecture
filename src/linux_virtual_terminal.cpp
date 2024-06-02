@@ -45,7 +45,7 @@ INIT_TERMIOS(InitTermios)
   tcsetattr(STDIN_FILENO, TCSANOW, &terminal_session_current); 
 }
 
-RESET_TERMIOS(resetTermios)
+RESET_TERMIOS(ResetTermios)
 {
   tcsetattr(STDIN_FILENO, TCSANOW, &terminal_session_old);
 }
