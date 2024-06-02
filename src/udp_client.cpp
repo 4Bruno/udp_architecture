@@ -22,7 +22,6 @@
 #include "console_sequences.cpp"
 #include "math.h"
 
-#pragma comment( lib, "Winmm.lib" )
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
 
 #define SOCKET_RETURN_ON_ERROR(fcall) if ((fcall) == SOCKET_ERROR)\
@@ -453,9 +452,8 @@ main(int argc, char * argv[])
     u32 packages_per_second = 2;
 #endif
     r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
-    // http://www.geisswerks.com/ryan/FAQS/timing.html
-    // Sleep will do granular scheduling up to 1ms
-    timeBeginPeriod(1);
+
+    HighDefinitionTimeBegin();
 
     ConsolePrintstatus("Start sending msg to server (rate speed %i packages per second)",packages_per_second);
 
@@ -810,6 +808,15 @@ main(int argc, char * argv[])
 #endif
         }
 
+        ConsoleAppendAt(&con, 6, 40, "Last: %u",packet_seq);
+        for (i32 i = 31; i >= 0; --i)
+        {
+            b32 is_set = (packet_seq_bit >> i) & 0x01;
+            ConsoleAppendAt(&con, 7, 40 + 31 - i, "%c",is_set ? 'A' : '-');
+        }
+        //remote_seq = UINT_MAX;
+        //remote_seq_bit = ~0;
+
         // sleep expected time
         delta_time time_frame_elapsed = 
             GetTimeDiff(GetRealTime(), starting_time, perf_freq);
@@ -827,22 +834,13 @@ main(int argc, char * argv[])
             }
         }
 
-        ConsoleAppendAt(&con, 6, 40, "Last: %u",packet_seq);
-        for (i32 i = 31; i >= 0; --i)
-        {
-            b32 is_set = (packet_seq_bit >> i) & 0x01;
-            ConsoleAppendAt(&con, 7, 40 + 31 - i, "%c",is_set ? 'A' : '-');
-        }
-        //remote_seq = UINT_MAX;
-        //remote_seq_bit = ~0;
-
         ConsoleUpdateMetrics(time_frame_elapsed,avg_roundtrips);
         ConsoleSwapBuffer(&con);
     }
 
     DestroyConsole(&con);
 
-    timeEndPeriod(1);
+    HighDefinitionTimeEnd();
 
     CloseSocket(handle);
 

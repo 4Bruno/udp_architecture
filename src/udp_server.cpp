@@ -621,6 +621,9 @@ main()
     u32 packages_per_second = 20;
     r32 expected_ms_per_package = (1.0f / (r32)packages_per_second) * 1000.0f;
 
+    HighDefinitionTimeBegin();
+
+    // main loop - ml
     while ( server->keep_alive )
     {
         real_time starting_time;
@@ -736,7 +739,7 @@ main()
 
                 if (err == EWOULDBLOCK)
                 {
-                    STALL(1000);
+                    // nothing to read
                 }
                 else if (err == WSAECONNRESET)
                 {
@@ -767,8 +770,8 @@ main()
                 // 7.6 messages given that each msg has 32b header + 32b data
                 Assert(recv_datagram.header.messages <= sizeof(messages));
 
-                //i32 lost_on_purpose = (rand() % 20) == 0;
-                i32 lost_on_purpose = 0;
+                i32 lost_on_purpose = (rand() % 20) == 0;
+                //i32 lost_on_purpose = 0;
 
                 u32 begin_data_offset = 0;
                 for (i32 msg_index = 0;
@@ -1029,8 +1032,36 @@ main()
                 client->last_message_from_server = GetRealTime();
             }
         }
+
+        // sleep expected time
+        delta_time time_frame_elapsed = 
+            GetTimeDiff(GetRealTime(), starting_time, clock_freq);
+        r32 remaining_ms = expected_ms_per_package - time_frame_elapsed;
+
+        ConsoleAppendAt(&con,0,0,"expected_ms_per_package: %f", expected_ms_per_package);
+        ConsoleAppendAt(&con,1,0,"time_frame_elapsed: %f", time_frame_elapsed);
+        ConsoleAppendAt(&con,2,0,"remaining_ms: %f", remaining_ms);
+
+        if (remaining_ms > 1.0f)
+        {
+            time_frame_elapsed = GetTimeDiff(GetRealTime(), starting_time, clock_freq);
+            remaining_ms = expected_ms_per_package - time_frame_elapsed;
+            while (remaining_ms > 1.0f)
+            {
+                Sleep((DWORD)remaining_ms);
+                time_frame_elapsed = GetTimeDiff(GetRealTime(), starting_time, clock_freq);
+                remaining_ms = expected_ms_per_package - time_frame_elapsed;
+            }
+        }
+
+
+        ConsoleAppendAt(&con,3,0,"Time Elapsed: %f", time_frame_elapsed);
+
         ConsoleSwapBuffer(&con);
+
     }
+
+    HighDefinitionTimeEnd();
 
     DestroyConsole(&con);
 
