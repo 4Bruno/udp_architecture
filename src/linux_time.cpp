@@ -1,8 +1,7 @@
 #include "platform.h"
 #include <errno.h>
     
-real_time
-GetRealTime()
+GET_REAL_TIME(GetRealTime)
 {
     real_time time;
 
@@ -11,8 +10,8 @@ GetRealTime()
     return time;
 }
 
-real_time
-GetClockResolution()
+
+GET_CLOCK_RESOLUTION(GetClockResolution)
 {
     real_time perf_freq;
     clock_getres(CLOCK_REALTIME,&perf_freq); 
@@ -20,8 +19,7 @@ GetClockResolution()
 }
 
 /* Returns milliseconds */
-delta_time
-GetTimeDiff(real_time TimeEnd,real_time TimeStart,real_time ClockFreq)
+GET_TIME_DIFF(GetTimeDiff)
 {
   delta_time dt = 
     (TimeEnd.tv_sec - TimeStart.tv_sec) * 1000.0 
@@ -34,7 +32,7 @@ GetTimeDiff(real_time TimeEnd,real_time TimeStart,real_time ClockFreq)
   return dt;
 }
 
-int msleep(u32 msec)
+MS_SLEEP(msleep)
 {
   struct timespec ts;
   int res;
@@ -54,3 +52,6 @@ int msleep(u32 msec)
 
   return res;
 }
+
+HIGH_DEFINITION_TIME_BEGIN(HighDefinitionTimeBegin) {};
+HIGH_DEFINITION_TIME_END(HighDefinitionTimeEnd) {};

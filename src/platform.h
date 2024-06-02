@@ -83,17 +83,29 @@ typedef float r32;
 typedef double r64;
 
 
-API real_time
-GetRealTime();
+#define GET_REAL_TIME(name) real_time name()
+typedef GET_REAL_TIME(get_real_time);
+API GET_REAL_TIME(GetRealTime);
 
-API real_time
-GetClockResolution();
+#define GET_CLOCK_RESOLUTION(name) real_time name()
+typedef GET_CLOCK_RESOLUTION(get_clock_resolution);
+API GET_CLOCK_RESOLUTION(GetClockResolution);
 
-API delta_time
-GetTimeDiff(real_time TimeEnd,real_time TimeStart,real_time ClockFreq);
+#define GET_TIME_DIFF(name) delta_time name(real_time TimeEnd,real_time TimeStart,real_time ClockFreq)
+typedef GET_TIME_DIFF(get_time_diff);
+API GET_TIME_DIFF(GetTimeDiff);
 
-API int 
-msleep(u32 msec);
+#define HIGH_DEFINITION_TIME_BEGIN(name) void name()
+typedef HIGH_DEFINITION_TIME_BEGIN(high_definition_time_begin);
+API HIGH_DEFINITION_TIME_BEGIN(HighDefinitionTimeBegin);
+
+#define HIGH_DEFINITION_TIME_END(name) void name()
+typedef HIGH_DEFINITION_TIME_END(high_definition_time_end);
+API HIGH_DEFINITION_TIME_END(HighDefinitionTimeEnd);
+
+#define MS_SLEEP(name) int name(u32 msec)
+typedef MS_SLEEP(ms_sleep);
+API MS_SLEEP(msleep);
 
 #define Kilobytes(x) 1024 * x
 #define Megabytes(x) 1024 * Kilobytes(x)

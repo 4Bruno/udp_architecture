@@ -1,7 +1,8 @@
 #include "platform.h"
     
-inline real_time
-GetRealTime()
+#pragma comment( lib, "Winmm.lib" )
+
+GET_REAL_TIME(GetRealTime)
 {
     real_time time;
 
@@ -10,8 +11,7 @@ GetRealTime()
     return time;
 }
 
-inline real_time
-GetClockResolution()
+GET_CLOCK_RESOLUTION(GetClockResolution)
 {
     real_time perf_freq;
     QueryPerformanceFrequency(&perf_freq); 
@@ -19,8 +19,7 @@ GetClockResolution()
 }
 
 /* Returns us milliseconds  */
-inline delta_time
-GetTimeDiff(real_time TimeEnd,real_time TimeStart,real_time ClockFreq)
+GET_TIME_DIFF(GetTimeDiff)
 {
     real_time time;
 
@@ -32,3 +31,20 @@ GetTimeDiff(real_time TimeEnd,real_time TimeStart,real_time ClockFreq)
 
     return time_diff;
 }
+
+MS_SLEEP(msleep)
+{
+    Sleep(msec);
+    return 0;
+}
+
+HIGH_DEFINITION_TIME_BEGIN(HighDefinitionTimeBegin) 
+{
+    // http://www.geisswerks.com/ryan/FAQS/timing.html
+    // Sleep will do granular scheduling up to 1ms
+    timeBeginPeriod(1);
+};
+HIGH_DEFINITION_TIME_END(HighDefinitionTimeEnd) 
+{
+    timeEndPeriod(1);
+};
