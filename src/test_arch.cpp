@@ -24,7 +24,7 @@ int main()
 
     Sleep(1000);
 
-    const int total_clients = 6;
+    const int total_clients = 1;
     PROCESS_INFORMATION client_pi[total_clients];
     for (int client_index = 0; client_index < total_clients; ++client_index)
     {

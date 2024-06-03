@@ -27,8 +27,13 @@ struct client_info
     u32 fd_entry_count;
     struct client_info ** entry;
 
+    /*
+     * seq_bit - 32 bits signaling whether 
+     * 1111 1111 1111 1111 1111 1111 1111 1111
+     */
+
     // this are the packages the server sent to client
-    u32 server_packet_seq;
+    volatile u32 server_packet_seq;
     u32 server_packet_seq_bit;
     u32 server_packet_seq_critical;
 
@@ -103,7 +108,7 @@ CreateClientLog(struct client_info * client)
 
 
 struct client_info *
-Client(u32 addr, u32 port, struct hash_map * client_map)
+Client(u32 addr, u32 port, struct hash_map * client_map, u32 incoming_seq)
 {
     struct client_info ** ptr_client = 0;
     struct client_info * client = 0;
@@ -156,7 +161,8 @@ Client(u32 addr, u32 port, struct hash_map * client_map)
         // none are critical
         client->server_packet_seq_critical = 0;
 
-        client->client_remote_seq = UINT_MAX;
+        // set client status based on package received
+        client->client_remote_seq = incoming_seq - 1;
         client->client_remote_seq_bit = ~0;
 #else
         client->server_packet_seq = UINT_MAX - 345;
@@ -655,7 +661,7 @@ main()
                 if (is_packet_critical)
                 {
                     
-                    ConsoleAppendAt(&con,10,0,
+                    ConsoleAppendAt(&con,con.buffer_size.Y,0,
                                 "%s Package was lost! %u (critical?%s)",
                                 FormatIP(client->addr, client->port).ip ,
                                 (client->server_packet_seq - 31), 
@@ -756,11 +762,12 @@ main()
             }
             else
             {
-                struct client_info * client = Client(from_address, from_port, &server->client_map);
 
                 u32 recv_packet_seq = recv_datagram.header.seq;
                 u32 recv_packet_ack     = recv_datagram.header.ack;
                 u32 recv_packet_ack_bit = recv_datagram.header.ack_bit;
+
+                struct client_info * client = Client(from_address, from_port, &server->client_map, recv_packet_seq);
 
                 Assert( (client->server_packet_seq == recv_packet_ack) || IsSeqGreaterThan(client->server_packet_seq, recv_packet_ack));
 
@@ -940,13 +947,17 @@ main()
                  ++entry_index /* decrement if client removed */)
         {
             struct client_info ** client_entry = (struct client_info **)server->client_map.entries_begin + entry_index;
+            int start_line = 6 + entry_index;
             if (*client_entry)
             {
-                int start_line = 1 + entry_index;
                 ConsoleAppendAt(&con,start_line,0,
                              "[%i] Client %s", 
                              entry_index,
                              FormatIP((*client_entry)->addr, (*client_entry)->port).ip);
+            }
+            else
+            {
+                ConsoleAppendAt(&con,start_line,0,"%.s",40,' ');
             }
         }
 #endif
@@ -973,14 +984,84 @@ main()
             if (GetTimeDiff(GetRealTime(), client->last_message_from_server,clock_freq) > expected_ms_per_package)
             {
 
-                // signal next seq package as not received
-                client->server_packet_seq += 1;
-                u32 new_package_bit_index = (client->server_packet_seq & 31);
+                // check last package & incr seq
+                u32 server_old_seq = client->server_packet_seq++;
+                u32 old_packaget_bit_index = (server_old_seq & 31);
+                u32 bit_to_check = (1 << old_packaget_bit_index);
+
+                i32 is_packet_ack = (client->server_packet_seq_bit & bit_to_check) == bit_to_check;
+                i32 is_packet_critical = (client->server_packet_seq_critical & bit_to_check) == bit_to_check;
+
+                u32 server_new_seq = ++server_old_seq;
+                u32 new_package_bit_index = (server_new_seq & 31);
+
+                // set it as not ack
                 client->server_packet_seq_bit = 
                     (client->server_packet_seq_bit & ~(1 << new_package_bit_index));
 
+                if (!is_packet_ack)
+                {
+                    if (is_packet_critical)
+                    {
+
+                        ConsoleAppendAt(&con,con.buffer_size.Y,0,
+                                "%s Package was lost! %u (critical?%s)",
+                                FormatIP(client->addr, client->port).ip ,
+                                (client->server_packet_seq - 31), 
+                                is_packet_critical ? "True" : "False");
+
+                        queue_message * queue = &client->queue_msg_to_send;
+                        struct message * msg = queue->messages + queue->next;
+                        u32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
+
+                        Assert(BetweenIn(packet_index,0,32));
+
+                        if (
+                                (packet_index == new_package_bit_index)
+                                &&
+                                IsCriticalMessage(msg)
+                           )
+                        {
+                            // msg at next index needs to be re-sent. simply adv pointer
+                            queue->next += 1;
+                            queue->next &= (ArrayCount(queue->messages) - 1);
+                        }
+
+                        int next_index = (queue->next == queue->begin) ? queue->next + 1 : queue->next;
+                        next_index &= (ArrayCount(queue->messages) - 1);
+
+                        // corner case begin == next
+                        for (u32 i  = next_index; 
+                                i != queue->begin; 
+                                /* in loop code */)
+                        {
+                            msg = queue->messages + i;
+                            packet_index = queue->msg_sent_in_package_bit_index[i];
+                            if (
+                                    (packet_index == new_package_bit_index)
+                                    &&
+                                    IsCriticalMessage(msg)
+                               )
+                            {
+                                // we need to send it again. swap if necessary and incr next
+                                if (queue->next != i)
+                                {
+                                    struct message * next_msg = (queue->messages + queue->next);
+                                    memcpy(next_msg,msg, sizeof(struct message));
+                                    memset(msg, 0, sizeof(struct message));
+                                }
+                                queue->next += 1; 
+                                queue->next &= (ArrayCount(queue->messages) - 1);
+                            }
+                            i += 1;
+                            i &= (ArrayCount(queue->messages) - 1);
+                        }
+
+                    }
+            }
+
                 struct packet packet;
-                packet.header.seq       = client->server_packet_seq;
+                packet.header.seq       = server_new_seq;
                 packet.header.ack       = client->client_remote_seq;
                 packet.header.ack_bit   = client->client_remote_seq_bit;
                 packet.header.protocol  = PROTOCOL_ID;
@@ -1028,11 +1109,35 @@ main()
                     //logn("Error sending ack package %u. %s", packet.header.seq, GetLastSocketErrorMessage());
                     server->keep_alive = 0;
                 }
+                else
+                {
+                    ConsoleAppendAt(&con,15,0,"Last ack %i", packet.header.ack);
+                }
                 
+                u32 packet_seq = client->server_packet_seq;
+                u32 packet_seq_bit = client->server_packet_seq_bit;
+                u32 remote_seq = client->client_remote_seq;
+                u32 remote_seq_bit = client->client_remote_seq_bit;
+
+                u32 start_at_line = 10;
+                ConsoleAppendAt(&con, start_at_line++, 40, "Last: %u",packet_seq);
+                for (i32 i = 31; i >= 0; --i)
+                {
+                    b32 is_set = (packet_seq_bit >> i) & 0x01;
+                    ConsoleAppendAt(&con, start_at_line, 40 + 31 - i, "%c",is_set ? 'A' : '-');
+                }
+                ConsoleAppendAt(&con,  ++start_at_line, 40, "Remote: %u",remote_seq);
+                ++start_at_line;
+                for (i32 i = 31; i >= 0; --i)
+                {
+                    b32 is_set = (remote_seq_bit >> i) & 0x01;
+                    ConsoleAppendAt(&con, start_at_line, 40 + 31 - i, "%c",is_set ? 'A' : '-');
+                }
                 client->last_message_from_server = GetRealTime();
             }
         }
 
+#if 0
         // sleep expected time
         delta_time time_frame_elapsed = 
             GetTimeDiff(GetRealTime(), starting_time, clock_freq);
@@ -1056,6 +1161,7 @@ main()
 
 
         ConsoleAppendAt(&con,3,0,"Time Elapsed: %f", time_frame_elapsed);
+#endif
 
         ConsoleSwapBuffer(&con);
 
