@@ -21,6 +21,7 @@
 #include "protocol.h"
 #include "console_sequences.cpp"
 #include "math.h"
+#include "multithread.h"
 
 #define QUAD_TO_MS(Q) Q.QuadPart * (1.0f / 1000.0f)
 
@@ -29,8 +30,11 @@
                                   logn("Socket error: \n" #fcall "\n%s", GetLastSocketErrorMessage());\
                                   return 1;\
                               }
+#define MULTI_THREAD true
 
 static volatile int keep_alive = 1;
+static real_time perf_freq = GetClockResolution();
+static console con;
 
 struct package_info
 {
@@ -285,9 +289,6 @@ CreatePackages(const u32 * packet_seq_bit, struct queue_message * queue, enum pa
     }
 }
 
-
-struct console con;
-
 void
 ConsolePrintstatus(const char * format, ...)
 {
@@ -346,6 +347,260 @@ FormatIP(u32 addr, u32 port)
     return format_ip;
 }
 
+struct client_info
+{
+    socket_handle SocketHandle;
+
+    volatile u32 packet_seq;
+    volatile u32 packet_seq_bit;
+    volatile u32 remote_seq;
+    volatile u32 remote_seq_bit;
+
+    u32 packet_seq_critical;
+
+    volatile queue_message queue_msg_to_send;
+
+    real_time   packet_seq_realtime[32];
+    volatile delta_time  packet_seq_deltatime[32];
+
+    volatile client_status Status;
+
+    HANDLE sync_mutex;
+};
+
+THREAD_WORK_HANDLER(ThreadWorkHandlerIncPck)
+{
+    client_info * Client = (client_info *)Data;
+
+    while (!Queue->KillSignal)
+    {
+        struct packet recv_datagram;
+        u32 max_packet_size = sizeof( struct packet);
+
+        sockaddr_in from;
+        socklen_t fromLength = sizeof( from );
+
+        int bytes = recvfrom( Client->SocketHandle, 
+                (char *)&recv_datagram, max_packet_size, 
+                0, 
+                (sockaddr*)&from, &fromLength );
+
+        if ( bytes == SOCKET_ERROR )
+        {
+            if (socket_errno != EWOULDBLOCK)
+            {
+#if 0
+                coord new_size = GetTerminalSize();
+                if (new_size.Y != con.size.X || new_size.X != con.size.Y)
+                {
+                    ConsoleClear();
+                    con.size = new_size;
+                    SetScrollMargin(&con, con.margin_top, con.margin_bottom);
+                }
+#endif
+
+                ConsoleAppendAt(&con,10,40,"Error recvfrom(): %s", GetLastSocketErrorMessage());
+                ConsoleAppendAt(&con,11,40,"%s", GetLastSocketErrorMessage());
+                ConsoleClientStatus("Server error");
+#if 0
+                keep_alive = false;
+#else
+                // do nothing
+                //reset seq
+                //Client->packet_seq = UINT_MAX;
+                //Client->packet_seq_bit = ~0; // signal pcks as received, corner case initialization
+                Client->remote_seq = UINT_MAX;
+                Client->remote_seq_bit = ~0;
+#endif
+            }
+        }
+        else if ( bytes == 0 )
+        {
+            logn("No more data. Closing.");
+        }
+        else
+        {
+
+            ConsoleClientStatus("Connected");
+
+#if 0
+            unsigned int from_address = 
+                ntohl( from.sin_addr.s_addr );
+
+            unsigned int from_port = 
+                ntohs( from.sin_port );
+#endif
+
+            u32 recv_packet_seq     = recv_datagram.header.seq;
+            u32 recv_packet_ack     = recv_datagram.header.ack;
+            u32 recv_packet_ack_bit = recv_datagram.header.ack_bit;
+
+            Assert( (Client->packet_seq == recv_packet_ack) || IsSeqGreaterThan(Client->packet_seq, recv_packet_ack));
+
+            struct message * messages[8];
+            i32 msg_count = recv_datagram.header.messages;
+            // datagram with 492b max payload can have at most
+            // 7.6 messages given that each msg has 32b header + 32b data
+            Assert(recv_datagram.header.messages <= sizeof(messages));
+
+            i32 inc_package_has_any_critical_msg = 0;
+            u32 begin_data_offset = 0;
+            for (i32 msg_index = 0;
+                    msg_index < msg_count;
+                    ++msg_index)
+            {
+                struct message ** msg = messages + msg_index;
+                *msg = (struct message *)recv_datagram.data + begin_data_offset;
+                inc_package_has_any_critical_msg = 
+                    inc_package_has_any_critical_msg | IsCriticalMessage(*msg);
+
+                // strip critical flag
+                (*msg)->header.message_type = GetMessageType(*msg);
+
+                begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
+            }
+
+#if 0
+            if (inc_package_has_any_critical_msg)
+            {
+                ConsoleAddMessage("Critical msg from server");
+            }
+#endif
+
+            // debug lose all critical
+            // TODO: What do I mean here? Why wouldn't I process a package with crtical msgs?
+            inc_package_has_any_critical_msg = 0;
+            if (!inc_package_has_any_critical_msg)
+            {
+                {
+                    /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
+                    // unless crafted package, recv package should always be higher than our record
+                    Assert(IsSeqGreaterThan(recv_packet_seq,Client->remote_seq));
+
+                    // TODO: what if we lose all packages for 1 > s?
+                    // should we simply reset to 0 all bits and move on
+                    // TEST THIS
+                    // int on purpose check abs (to look at no branching method)
+                    // https://graphics.stanford.edu/~seander/bithacks.html#IntegerAbs
+                    i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - Client->remote_seq));
+                    Assert(delta_local_remote_seq < 32);
+
+                    u32 bit_mask = 0;
+                    u32 remote_bit_index = (recv_packet_seq & 31);
+
+                    if (delta_local_remote_seq < 32)
+                    {
+                        u32 local_bit_index = (Client->remote_seq & 31);
+
+                        u32 lo = min(remote_bit_index, local_bit_index);
+                        u32 hi = max(remote_bit_index, local_bit_index);
+                        u32 max_minus_hi = (31 - hi);
+
+                        bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+
+                        //     hi        low 
+                        //      v         v
+                        // 00000111111111110000
+                        if (remote_bit_index >= local_bit_index)
+                        {
+                            //     hi        low 
+                            //      v         v
+                            // 11111000000000001111
+                            bit_mask = ~bit_mask; 
+                        }
+
+                        bit_mask = bit_mask ^ ((u32)1 << lo);
+                    }
+
+                    u32 set_bit_mask = ((u32)1 << remote_bit_index);
+                    //Client->remote_seq_bit = (Client->remote_seq_bit & bit_mask) | ((u32)1 << remote_bit_index);
+                    InterlockedAnd((LONG volatile *)&Client->remote_seq_bit,bit_mask);
+                    InterlockedOr((LONG volatile *)&Client->remote_seq_bit, set_bit_mask);
+                    b32 result_cmp_ex = CompareAndExchangeIfMatches(&Client->remote_seq, recv_packet_seq , Client->remote_seq);
+
+                    Assert(result_cmp_ex);
+                }
+
+                /* UPDATE OUR BIT ARRAY OF PACKAGES SENT CONFIRMED BY PEER */
+
+                u32 delta_seq_and_ack = (Client->packet_seq - recv_packet_ack);
+                u32 bit_mask = 0;
+
+                // TODO: peer is ack packages 1 s old, should we issue a sync flag?
+                if (delta_seq_and_ack <= 31)
+                {
+                    u32 remote_bit_index = (recv_packet_ack & 31);
+                    u32 local_bit_index = (Client->packet_seq & 31);
+
+                    u32 lo = min(remote_bit_index, local_bit_index);
+                    u32 hi = max(remote_bit_index, local_bit_index);
+                    u32 max_minus_hi = (31 - hi);
+
+                    bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
+
+                    //     hi        low 
+                    //      v         v
+                    // 00000111111111110000
+                    if (local_bit_index >= remote_bit_index)
+                    {
+                        //     hi        low 
+                        //      v         v
+                        // 11111000000000001111
+                        bit_mask = ~bit_mask; 
+                    }
+
+                    // TODO sync deltatime update
+                    bit_mask = bit_mask ^ ((u32)1 << lo);
+                    real_time Time = Client->packet_seq_realtime[remote_bit_index];
+                    delta_time NewDeltaTime = GetTimeDiff(GetRealTime(), Time, perf_freq);
+                    Client->packet_seq_deltatime[remote_bit_index] = NewDeltaTime;
+                }
+
+                //Client->packet_seq_bit = (recv_packet_ack_bit & bit_mask);
+                u32 new_seq_bit = (recv_packet_ack_bit & bit_mask);
+                b32 result_cmp_ex = CompareAndExchangeIfMatches(&Client->packet_seq_bit, new_seq_bit, Client->packet_seq_bit);
+                Assert(result_cmp_ex);
+            }
+        }
+
+        switch (Client->Status)
+        {
+            case client_status_in_game:
+                {
+                } break;
+            case client_status_auth:
+                {
+                } break;
+            case client_status_trying_auth:
+                {
+                } break;
+            case client_status_none:
+                {
+                    struct udp_auth login_data;
+                    sprintf_s(login_data.user,"%s","anonymous");
+                    sprintf_s(login_data.pwd,"%s","1234");
+
+                    Client->Status = client_status_trying_auth;
+
+                    i32 LockStatus = ThreadWaitForSingleObject(Client->sync_mutex);
+
+                    if (!ThreadIsLockInPlace(LockStatus))
+                    {
+                        Assert(0);
+                    }
+
+                    CreatePackages((u32 *)&Client->packet_seq_bit,(queue_message *)&Client->queue_msg_to_send, package_type_auth, (const void *)&login_data, sizeof(udp_auth), true);
+
+                    ThreadReleaseMutex(Client->sync_mutex);
+
+                } break;
+            default:
+                {
+                } break;
+        }
+
+    }
+}
 
 int
 main(int argc, char * argv[])
@@ -357,7 +612,7 @@ main(int argc, char * argv[])
 
     InitializeTerminateSignalHandler();
 
-    console con = CreateConsole(&Arena);
+    con = CreateConsole(&Arena);
     con.margin_top = 5;
     con.margin_bottom = 1;
     con.current_line = con.margin_top + 1;
@@ -379,7 +634,6 @@ main(int argc, char * argv[])
         logn("Error initializing sockets library. %s", GetLastSocketErrorMessage());
     }
 
-    socket_handle handle = 0;
     int port = 30000;
 
 #if 1
@@ -414,28 +668,44 @@ main(int argc, char * argv[])
 
     ConsoleClientStatus("Disconnected");
 
-    // server port
+    client_info NetworkClient = {};
+
+    /* BEGIN SERVER CONNECTION */
     sockaddr_in server_addr = CreateSocketAddress( ip_addr, port);
-    SOCKET_RETURN_ON_ERROR(CreateSocketUdp(&handle));
+    SOCKET_RETURN_ON_ERROR(CreateSocketUdp(&NetworkClient.SocketHandle));
     BOOL opt_val = true;
     int opt_len = sizeof(opt_val);
-    setsockopt(handle, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt_val, opt_len);
-    SOCKET_RETURN_ON_ERROR(BindSocket(handle, 0));
-    SOCKET_RETURN_ON_ERROR(SetSocketNonBlocking(handle));
+    setsockopt(NetworkClient.SocketHandle, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt_val, opt_len);
+    SOCKET_RETURN_ON_ERROR(BindSocket(NetworkClient.SocketHandle, 0));
+#if !MULTI_THREAD
+    SOCKET_RETURN_ON_ERROR(SetSocketNonBlocking(NetworkClient.SocketHandle));
+#endif
+    /* END SERVER CONNECTION */
 
 #if 1
-    u32 packet_seq = UINT_MAX;
-    u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
-    u32 remote_seq = UINT_MAX;
-    u32 remote_seq_bit = ~0;
-    real_time packet_seq_realtime[32];
-    delta_time packet_seq_deltatime[32];
-    for (u32 i = 0; i < ArrayCount(packet_seq_realtime); ++i)
+    NetworkClient.packet_seq     = UINT_MAX;
+    NetworkClient.packet_seq_bit = ~0;
+    NetworkClient.remote_seq     = UINT_MAX;
+    NetworkClient.remote_seq_bit = ~0;
+    NetworkClient.sync_mutex =  CreateMutex();
+    NetworkClient.packet_seq_critical = 0;
+
+    Assert(NetworkClient.sync_mutex != NULL);
+
+    for (u32 i = 0; i < ArrayCount(NetworkClient.packet_seq_realtime); ++i)
     {
-        ZeroTime(packet_seq_realtime[i]);
-        packet_seq_deltatime[i] = 0.0f;
+        ZeroTime(NetworkClient.packet_seq_realtime[i]);
+        NetworkClient.packet_seq_deltatime[i] = 0.0f;
     }
-    u32 packet_seq_critical = 0;
+
+    NetworkClient.Status = client_status_none;
+
+    memset((void *)&NetworkClient.queue_msg_to_send, 0, sizeof(queue_message));
+    for (u32 i  = 0; i < ArrayCount(NetworkClient.queue_msg_to_send.msg_sent_in_package_bit_index); ++i)
+    {
+        NetworkClient.queue_msg_to_send.msg_sent_in_package_bit_index[i] = 32;
+    }
+
 #else
     u32 packet_seq = UINT_MAX - 640;
     u32 packet_seq_bit = ~0; // signal pcks as received, corner case initialization
@@ -443,10 +713,8 @@ main(int argc, char * argv[])
     u32 remote_seq_bit = ~0;
 #endif
 
-    real_time perf_freq = GetClockResolution();
-
 #define PACKAGES_PER_SECOND 32
-#if 0
+#if 1
     u32 packages_per_second = PACKAGES_PER_SECOND;
 #else
     u32 packages_per_second = 2;
@@ -457,15 +725,14 @@ main(int argc, char * argv[])
 
     ConsolePrintstatus("Start sending msg to server (rate speed %i packages per second)",packages_per_second);
 
-    client_status my_status_with_server = client_status_none;
+    // BEGIN THREAD CREATION- btc
+    thread_work_queue QueueIncPck = {};
+    u32 CountThreads = 1;
+    CreateWorkQueue(&QueueIncPck, CountThreads);
 
-    queue_message queue_msg_to_send;
-    memset(&queue_msg_to_send, 0, sizeof(queue_message));
-    for (u32 i  = 0; i < ArrayCount(queue_msg_to_send.msg_sent_in_package_bit_index); ++i)
-    {
-        queue_msg_to_send.msg_sent_in_package_bit_index[i] = 32;
-    }
+    ThreadAddWorkToQueue(&QueueIncPck, ThreadWorkHandlerIncPck, (void *)&NetworkClient);
 
+    // main loop - ml
     while ( keep_alive )
     {
         real_time starting_time;
@@ -479,19 +746,42 @@ main(int argc, char * argv[])
             keep_alive = false;
         }
 
-        u32 packet_index_to_check = (packet_seq + 1) & (32 - 1);
+
+        i32 LockStatus = ThreadWaitForSingleObject(NetworkClient.sync_mutex);
+
+        if (!ThreadIsLockInPlace(LockStatus))
+        {
+            Assert(0);
+        }
+
+        u32 check_packet_seq = NetworkClient.packet_seq + 1;
+        u32 check_packet_seq_bit = NetworkClient.packet_seq_bit;
+        u32 current_packet_seq_critical = NetworkClient.packet_seq_critical;
+        u32 current_remote_seq = NetworkClient.remote_seq;
+        u32 current_remote_seq_bit = NetworkClient.remote_seq_bit;
+
+        ThreadReleaseMutex(NetworkClient.sync_mutex);
+
+        u32 packet_index_to_check = check_packet_seq & (32 - 1);
         u32 packet_bit_index_to_check = (1 << packet_index_to_check);
-        i32 is_packet_ack = (packet_seq_bit & packet_bit_index_to_check) == packet_bit_index_to_check;
-        i32 is_packet_critical = (packet_seq_critical & packet_bit_index_to_check) == packet_bit_index_to_check;
+        i32 is_packet_ack = (check_packet_seq_bit & packet_bit_index_to_check) == packet_bit_index_to_check;
+        i32 is_packet_critical = (current_packet_seq_critical & packet_bit_index_to_check) == packet_bit_index_to_check;
+
 
         if (!is_packet_ack)
         {
             //ConsoleAddMessage("Package was lost! %u (critical?%s)", (packet_seq - 31), is_packet_critical ? "True" : "False");
             ConsoleIncrCL(&con, true);
-            ConsoleAppendAt(&con, con.current_line,0,"Package was lost! %u (critical?%s)", (packet_seq - 31), is_packet_critical ? "True" : "False");
+            ConsoleAppendAt(&con, con.current_line,0,"Package was lost! %u (critical?%s)", (check_packet_seq - 31), is_packet_critical ? "True" : "False");
             if (is_packet_critical)
             {
-                queue_message * queue = &queue_msg_to_send;
+                i32 LockStatus = ThreadWaitForSingleObject(NetworkClient.sync_mutex);
+
+                if (!ThreadIsLockInPlace(LockStatus))
+                {
+                    Assert(0);
+                }
+                queue_message * queue = (queue_message *)&NetworkClient.queue_msg_to_send;
                 struct message * msg = queue->messages + queue->next;
                 u32 packet_index = queue->msg_sent_in_package_bit_index[queue->next];
 
@@ -533,289 +823,115 @@ main(int argc, char * argv[])
                         queue->next = ( (++queue->next) & (ArrayCount(queue->messages) - 1));
                     }
                 }
-
+                ThreadReleaseMutex(NetworkClient.sync_mutex);
             }
-        }
-
-
-        {
-            struct packet recv_datagram;
-            u32 max_packet_size = sizeof( struct packet);
-
-            sockaddr_in from;
-            socklen_t fromLength = sizeof( from );
-
-            int bytes = recvfrom( handle, 
-                    (char *)&recv_datagram, max_packet_size, 
-                    0, 
-                    (sockaddr*)&from, &fromLength );
-
-            if ( bytes == SOCKET_ERROR )
-            {
-                if (socket_errno != EWOULDBLOCK)
-                {
-                    coord new_size = GetTerminalSize();
-                    if (new_size.Y != con.size.X || new_size.X != con.size.Y)
-                    {
-                        ConsoleClear();
-                        con.size = new_size;
-                        SetScrollMargin(&con, con.margin_top, con.margin_bottom);
-                    }
-                    //ConsolePrintstatus("Error recvfrom(). %s", GetLastSocketErrorMessage());
-                    ConsoleAppendAt(&con,10,40,"Error recvfrom(): %s", GetLastSocketErrorMessage());
-                    ConsoleAppendAt(&con,11,40,"%s", GetLastSocketErrorMessage());
-                    ConsoleClientStatus("Server error");
-#if 0
-                    keep_alive = false;
-#else
-                    // do nothing
-#endif
-                }
-            }
-            else if ( bytes == 0 )
-            {
-                logn("No more data. Closing.");
-            }
-            else
-            {
-
-                ConsoleClientStatus("Connected");
-
-#if 0
-                unsigned int from_address = 
-                    ntohl( from.sin_addr.s_addr );
-
-                unsigned int from_port = 
-                    ntohs( from.sin_port );
-#endif
-
-                u32 recv_packet_seq     = recv_datagram.header.seq;
-                u32 recv_packet_ack     = recv_datagram.header.ack;
-                u32 recv_packet_ack_bit = recv_datagram.header.ack_bit;
-
-                Assert( (packet_seq == recv_packet_ack) || IsSeqGreaterThan(packet_seq, recv_packet_ack));
-
-                struct message * messages[8];
-                i32 msg_count = recv_datagram.header.messages;
-                // datagram with 492b max payload can have at most
-                // 7.6 messages given that each msg has 32b header + 32b data
-                Assert(recv_datagram.header.messages <= sizeof(messages));
-
-                i32 inc_package_has_any_critical_msg = 0;
-                u32 begin_data_offset = 0;
-                for (i32 msg_index = 0;
-                        msg_index < msg_count;
-                        ++msg_index)
-                {
-                    struct message ** msg = messages + msg_index;
-                    *msg = (struct message *)recv_datagram.data + begin_data_offset;
-                    inc_package_has_any_critical_msg = 
-                        inc_package_has_any_critical_msg || IsCriticalMessage(*msg);
-
-                    // strip critical flag
-                    (*msg)->header.message_type = GetMessageType(*msg);
-
-                    begin_data_offset += (sizeof((*msg)->header) + (*msg)->header.len);
-                }
-
-#if 0
-                if (inc_package_has_any_critical_msg)
-                {
-                    ConsoleAddMessage("Critical msg from server");
-                }
-#endif
-
-                // debug lose all critical
-                inc_package_has_any_critical_msg = 0;
-                if (!inc_package_has_any_critical_msg)
-                {
-                    {
-                        /* SYNC INCOMING PACKAGE SEQ WITH OUR RECORDS */
-                        // unless crafted package, recv package should always be higher than our record
-                        Assert(IsSeqGreaterThan(recv_packet_seq,remote_seq));
-
-                        // TODO: what if we lose all packages for 1 > s?
-                        // should we simply reset to 0 all bits and move on
-                        // TEST THIS
-                        // int on purpose check abs (to look at no branching method)
-                        // https://graphics.stanford.edu/~seander/bithacks.html#IntegerAbs
-                        i32 delta_local_remote_seq = abs((i32)(recv_packet_seq - remote_seq));
-                        Assert(delta_local_remote_seq < 32);
-
-                        u32 bit_mask = 0;
-                        u32 remote_bit_index = (recv_packet_seq & 31);
-
-                        if (delta_local_remote_seq < 32)
-                        {
-                            u32 local_bit_index = (remote_seq & 31);
-
-                            u32 lo = min(remote_bit_index, local_bit_index);
-                            u32 hi = max(remote_bit_index, local_bit_index);
-                            u32 max_minus_hi = (31 - hi);
-
-                            bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
-
-                            //     hi        low 
-                            //      v         v
-                            // 00000111111111110000
-                            if (remote_bit_index >= local_bit_index)
-                            {
-                                //     hi        low 
-                                //      v         v
-                                // 11111000000000001111
-                                bit_mask = ~bit_mask; 
-                            }
-
-                            bit_mask = bit_mask ^ ((u32)1 << lo);
-                        }
-
-                        remote_seq_bit = (remote_seq_bit & bit_mask) | ((u32)1 << remote_bit_index);
-                        remote_seq = recv_packet_seq;
-                    }
-
-                    /* UPDATE OUR BIT ARRAY OF PACKAGES SENT CONFIRMED BY PEER */
-
-                    u32 delta_seq_and_ack = (packet_seq - recv_packet_ack);
-                    u32 bit_mask = 0;
-
-                    // TODO: peer is ack packages 1 s old, should we issue a sync flag?
-                    if (delta_seq_and_ack <= 31)
-                    {
-                        u32 remote_bit_index = (recv_packet_ack & 31);
-                        u32 local_bit_index = (packet_seq & 31);
-
-                        u32 lo = min(remote_bit_index, local_bit_index);
-                        u32 hi = max(remote_bit_index, local_bit_index);
-                        u32 max_minus_hi = (31 - hi);
-
-                        bit_mask = ((u32)~0 << (lo + max_minus_hi)) >> max_minus_hi;
-
-                        //     hi        low 
-                        //      v         v
-                        // 00000111111111110000
-                        if (local_bit_index >= remote_bit_index)
-                        {
-                            //     hi        low 
-                            //      v         v
-                            // 11111000000000001111
-                            bit_mask = ~bit_mask; 
-                        }
-
-                        bit_mask = bit_mask ^ ((u32)1 << lo);
-                        packet_seq_deltatime[remote_bit_index] = GetTimeDiff(GetRealTime(), packet_seq_realtime[remote_bit_index], perf_freq);
-                    }
-
-                    packet_seq_bit = (recv_packet_ack_bit & bit_mask);
-                }
-            }
-        }
-
-        switch (my_status_with_server)
-        {
-            case client_status_in_game:
-            {
-            } break;
-            case client_status_auth:
-            {
-            } break;
-            case client_status_trying_auth:
-            {
-            } break;
-            case client_status_none:
-            {
-                struct udp_auth login_data;
-                sprintf_s(login_data.user,"%s","anonymous");
-                sprintf_s(login_data.pwd,"%s","1234");
-
-                my_status_with_server = client_status_trying_auth;
-
-                CreatePackages(&packet_seq_bit,&queue_msg_to_send, package_type_auth, (const void *)&login_data, sizeof(udp_auth), true);
-
-            } break;
-            default:
-            {
-            } break;
         }
 
         r32 aggr_roundtrips = 0.0f;
         i32 count_pkgs_received = 0;
-        for (u32 i = 0; i < ArrayCount(packet_seq_deltatime); ++i)
+        for (u32 i = 0; i < ArrayCount(NetworkClient.packet_seq_deltatime); ++i)
         {
             u32 mask = ((u32)1 << i);
-            if ( (packet_seq_bit & mask) ==  mask )
+            if ( (check_packet_seq_bit & mask) ==  mask )
             {
-                aggr_roundtrips += packet_seq_deltatime[i];
+                aggr_roundtrips += NetworkClient.packet_seq_deltatime[i];
                 count_pkgs_received += 1;
             }
         }
         r32 avg_roundtrips = aggr_roundtrips / (r32)(max(count_pkgs_received, 1));
 
         // set current seq as not received
-        packet_seq += 1;
-        u32 new_package_bit_index = (packet_seq & 31);
-        packet_seq_bit = (packet_seq_bit & ~((u32)1 << new_package_bit_index));
 
-        struct packet packet;
-        packet.header.seq       = packet_seq;
-        packet.header.ack       = remote_seq;
-        packet.header.ack_bit   = remote_seq_bit;
-        packet.header.protocol  = PROTOCOL_ID;
-        packet.header.messages  = 0;
 
-        i32 is_critical = 0;
-        u32 current_size = 0;
-        queue_message * queue = &queue_msg_to_send;
-        for (u32 i = queue->begin; 
-                 i != queue->next; 
-                 i = ( (++i) & (ArrayCount(queue->messages) - 1)))
+        // send package
         {
-            struct message * msg = queue->messages + i;
-            u32 msg_size = msg ->header.len + sizeof(message_header);
-            u32 size_after_msg = (current_size + msg_size);
 
-            if ( size_after_msg <= sizeof(packet.data) )
+            u32 packet_seq  = InterlockedIncrement((LONG volatile *)&NetworkClient.packet_seq);
+            u32 new_package_bit_index = (packet_seq & 31);
+            u32 no_ack_bit_mask = ~((u32)1 << new_package_bit_index);
+            InterlockedAnd((LONG volatile *)&NetworkClient.packet_seq_bit, no_ack_bit_mask);
+
+            struct packet packet;
+            packet.header.seq       = packet_seq;
+            packet.header.ack       = current_remote_seq;
+            packet.header.ack_bit   = current_remote_seq_bit;
+            packet.header.protocol  = PROTOCOL_ID;
+            packet.header.messages  = 0;
+
+            i32 LockStatus = ThreadWaitForSingleObject(NetworkClient.sync_mutex);
+
+            if (!ThreadIsLockInPlace(LockStatus))
             {
-                memcpy(packet.data + current_size, msg, msg_size);
+                Assert(0);
+            }
 
-                is_critical = is_critical | IsCriticalMessage(msg);
+            i32 is_critical = 0;
+            u32 current_size = 0;
 
-                // keep track in which pck was sent
-                queue->msg_sent_in_package_bit_index[i] = new_package_bit_index;
+            queue_message * queue = (queue_message *)&NetworkClient.queue_msg_to_send;
 
-                current_size = size_after_msg;
-                queue->begin = (++queue->begin) & (ArrayCount(queue->messages) - 1);
-                packet.header.messages += 1;
-                if (current_size >= sizeof(packet.data))
+            for (u32 i = queue->begin; 
+                    i != queue->next; 
+                    i = ( (++i) & (ArrayCount(queue->messages) - 1)))
+            {
+                struct message * msg = queue->messages + i;
+                u32 msg_size = msg ->header.len + sizeof(message_header);
+                u32 size_after_msg = (current_size + msg_size);
+
+                if ( size_after_msg <= sizeof(packet.data) )
                 {
-                    break;
+                    memcpy(packet.data + current_size, msg, msg_size);
+
+                    is_critical = is_critical | IsCriticalMessage(msg);
+
+                    // keep track in which pck was sent
+                    queue->msg_sent_in_package_bit_index[i] = new_package_bit_index;
+
+                    current_size = size_after_msg;
+                    queue->begin = (++queue->begin) & (ArrayCount(queue->messages) - 1);
+                    packet.header.messages += 1;
+                    if (current_size >= sizeof(packet.data))
+                    {
+                        break;
+                    }
                 }
+            }
+
+            u32 set_not_bit_mask = (~((u32)1 << new_package_bit_index));
+            u32 is_critical_mask = ( (is_critical ? 1 : 0) << new_package_bit_index );
+            NetworkClient.packet_seq_critical = (NetworkClient.packet_seq_critical & set_not_bit_mask);
+            NetworkClient.packet_seq_critical = NetworkClient.packet_seq_critical | is_critical_mask;
+
+            NetworkClient.packet_seq_realtime[new_package_bit_index] = GetRealTime();
+
+            ThreadReleaseMutex(NetworkClient.sync_mutex);
+
+            if (SendPackage(NetworkClient.SocketHandle,server_addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
+            {
+                //logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());
+                //keep_alive = 0;
+            }
+            else
+            {
+#if 0
+                ConsoleIncrCL(&con, true);
+                ConsoleAppendAt(&con, con.current_line,0,"Sending package %i.",  packet.header.seq);
+#endif
             }
         }
 
-        packet_seq_critical = (packet_seq_critical & (~((u32)1 << new_package_bit_index)));
-        packet_seq_critical = packet_seq_critical | ( (is_critical ? 1 : 0) << new_package_bit_index );
-        packet_seq_realtime[new_package_bit_index] = GetRealTime();
-        if (SendPackage(handle,server_addr, (void *)&packet, sizeof(packet)) == SOCKET_ERROR)
-        {
-            //logn("Error sending package %i. %s", packet.header.seq , GetLastSocketErrorMessage());
-            //keep_alive = 0;
-        }
-        else
-        {
-#if 0
-            ConsoleIncrCL(&con, true);
-            ConsoleAppendAt(&con, con.current_line,0,"Sending package %i.",  packet.header.seq);
-#endif
-        }
-
-        ConsoleAppendAt(&con, 6, 40, "Last: %u",packet_seq);
+        ConsoleAppendAt(&con, 6, 40, "Last: %u",check_packet_seq);
         for (i32 i = 31; i >= 0; --i)
         {
-            b32 is_set = (packet_seq_bit >> i) & 0x01;
+            b32 is_set = (check_packet_seq_bit >> i) & 0x01;
             ConsoleAppendAt(&con, 7, 40 + 31 - i, "%c",is_set ? 'A' : '-');
         }
-        //remote_seq = UINT_MAX;
-        //remote_seq_bit = ~0;
+        ConsoleAppendAt(&con, 8, 40, "Remote: %u",current_remote_seq);
+        for (i32 i = 31; i >= 0; --i)
+        {
+            b32 is_set = (current_remote_seq_bit >> i) & 0x01;
+            ConsoleAppendAt(&con, 9, 40 + 31 - i, "%c",is_set ? 'A' : '-');
+        }
 
         // sleep expected time
         delta_time time_frame_elapsed = 
@@ -838,11 +954,15 @@ main(int argc, char * argv[])
         ConsoleSwapBuffer(&con);
     }
 
+    InterlockedOr((LONG volatile *)&QueueIncPck.KillSignal, true);
+
+    ThreadCompleteQueue(&QueueIncPck);
+
     DestroyConsole(&con);
 
     HighDefinitionTimeEnd();
 
-    CloseSocket(handle);
+    CloseSocket(NetworkClient.SocketHandle);
 
     ShutdownSockets();
 
