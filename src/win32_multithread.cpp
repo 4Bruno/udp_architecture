@@ -1,8 +1,6 @@
-
 #include "multithread.h"
     
-inline b32
-CompareAndExchangeIfMatches(volatile u32 * This, u32 UpdateTo, u32 IfMatchesThis)
+inline API COMPARE_AND_EX_IF_MATCHES(CompareAndExchangeIfMatches)
 {
     u32 OriginalValue = 
         InterlockedCompareExchange(
@@ -41,7 +39,7 @@ DoWorkOnQueue(thread_work_queue * Queue)
     return GoToSleep;
 }
 
-THREAD_COMPLETE_QUEUE(CompleteWorkQueue)
+THREAD_COMPLETE_QUEUE(ThreadCompleteQueue)
 {
     while (Queue->ThingsToDo != Queue->ThingsDone)
     {
@@ -51,7 +49,7 @@ THREAD_COMPLETE_QUEUE(CompleteWorkQueue)
     Queue->ThingsDone = 0;
 }
 
-THREAD_ADD_WORK_TO_QUEUE(AddWorkToQueue)
+THREAD_ADD_WORK_TO_QUEUE(ThreadAddWorkToQueue)
 {
     u32 NextWriteEntry = (Queue->CurrentWrite + 1) % ArrayCount(Queue->Entries);
     Assert(NextWriteEntry != Queue->CurrentRead);
@@ -125,4 +123,42 @@ CreateWorkQueue(thread_work_queue * Queue, u32 CountThreads)
         // 2) thread function reaches end
         CloseHandle(T);
     }
+}
+
+
+CREATE_MUTEX(CreateMutex)
+{
+    HANDLE h = CreateMutex( 
+            NULL,              // default security attributes
+            FALSE,             // initially not owned
+            NULL);             // unnamed mutex
+ 
+    if (h == NULL) 
+    {
+        printf("CreateMutex error: %lu\n", GetLastError());
+        return 0;
+    }
+
+    return h;
+}
+
+
+THREAD_WAIT_FOR_SINGLE_OBJECT(ThreadWaitForSingleObject)
+{
+    i32 WaitResult = WaitForSingleObject( Handle,INFINITE);
+
+    return WaitResult;
+}
+
+THREAD_RELEASE_MUTEX(ThreadReleaseMutex)
+{
+    i32 Result = ReleaseMutex(Handle);
+
+    return Result;
+}
+
+API THREAD_IS_LOCK_IN_PLACE(ThreadIsLockInPlace)
+{
+    b32 result = (WaitSignalResult == WAIT_OBJECT_0);
+    return result;
 }
